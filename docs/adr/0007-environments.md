@@ -2,15 +2,17 @@
 status: accepted
 ---
 
-# Three environment tiers, with the test and production hosts still open
+# Three environment tiers, test on the 790, production host still open
 
 Glovebox has a hosted runtime (the gate service and its SQLite database), so it gets environments. Each tier runs under its own Linux identity so that a ticket can never reach test state or production data.
 
-| Tier | Linux user | OpenClaw node | What runs | Who touches it |
-|------|-----------|---------------|-----------|----------------|
-| Throwaway | `factory` | the ticket's factory node | the ticket's own stack in rootless Docker | the ticket |
-| Test | `glovebox-test` | `glovebox-test` | only `origin/main`, in rootless Docker, long-lived | `scripts/env.py ensure-test`, from user timer `glovebox-test-env.timer` every 5 minutes |
-| Production | `frogger` | none | a `main` commit that is green on test | the operator only; never tickets or agents |
+| Tier | Linux user | OpenClaw node | Host | What runs | Who touches it |
+|------|-----------|---------------|------|-----------|----------------|
+| Throwaway | `factory` | the ticket's factory node | the factory node's host | the ticket's own stack in rootless Docker | the ticket |
+| Test | `glovebox-test` | `glovebox-test` | the 790 | only `origin/main`, in rootless Docker, long-lived | `scripts/env.py ensure-test`, from user timer `glovebox-test-env.timer` every 5 minutes |
+| Production | `frogger` | none | open | a `main` commit that is green on test | the operator only; never tickets or agents |
+
+**Test host.** The operator decided on 2026-11-15: "glovebox-test runs on the 790". The 790 hosts the dedicated `glovebox-test` Linux identity and OpenClaw node. This selects the host only; nothing is installed until `03-install-test` runs.
 
 **Shared tooling.** Throwaway and test share one compose file and one executable Python `scripts/env.py` with `up`, `check`, `reset`, `down`, `ensure-test` and `install-timer`. `up` creates the gitignored env file with the test token when it is missing. `install-timer` installs and starts the user timer `glovebox-test-env.timer`.
 
@@ -26,7 +28,6 @@ Glovebox has a hosted runtime (the gate service and its SQLite database), so it 
 
 ## Open decisions
 
-- **Test host.** Not chosen. Pick a host that runs no production. Required before the test installation (`03-install-test`) starts.
 - **Production host.** Not chosen. Required before the production installation (`04-install-prod`) starts.
 
 ## Consequences
