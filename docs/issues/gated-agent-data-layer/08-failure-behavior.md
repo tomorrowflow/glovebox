@@ -9,7 +9,7 @@
 **Status:** ready-for-agent
 
 - [ ] Each account reports a sync status from a closed vocabulary that includes at least current, stale, incomplete and blocked, plus the last successful sync time at minute precision.
-- [ ] When the fixture source is made unavailable, item and count tools return a fixed error enum or results marked stale or incomplete; never an apparently complete empty result.
+- [ ] When the fixture source is made unavailable, both hold: item and count tools report the fixed outage error enum for the affected account, and that account carries the status stale or incomplete together with its last successful sync time. A test fails if either is missing, and the result is never an apparently complete empty one.
 - [ ] After the fixture source recovers, status returns to current without operator action.
 - [ ] An unparseable fixture item is quarantined or skipped; it is visible only as a bounded status code and a capped count, and the rest of the response is unaffected.
 - [ ] A source that cannot be reached because access is not granted reports `blocked`.

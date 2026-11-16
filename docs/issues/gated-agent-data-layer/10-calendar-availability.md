@@ -4,7 +4,7 @@
 
 **What to build:** An agent can ask when the operator is busy or free, which events overlap, and when upcoming events start and end, for one or several calendar accounts its token covers. Events appear as handles with times and a busy status; titles, descriptions, locations, attendees and organizer details never cross the gate. Built against a fixture calendar source.
 
-**Blocked by:** 01, 02, 05
+**Blocked by:** 01, 02, 05, 06
 
 **Status:** ready-for-agent
 

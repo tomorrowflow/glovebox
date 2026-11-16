@@ -4,7 +4,9 @@
 
 **What to build:** A repeatable measurement of how well the quarantined classifier fills the semantic fields, and the prompt and configuration work to bring it to a level the operator accepts. This is worked last: live source coverage comes before classification quality (ADR 0003). It is separate from text isolation and never changes or gates the isolation tests (ADR 0006).
 
-**Blocked by:** 01, 02, 05, 09, 12
+**Blocked by:** 01, 02, 05, 09, 12, 14, 15, 16, 17, 18, 19, 20
+
+Quality work starts only after source coverage. A source ticket counts as resolved when its source is delivered live or recorded as access-blocked with its reason (ADR 0003).
 
 **Status:** ready-for-agent
 

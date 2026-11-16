@@ -19,4 +19,4 @@
 - [ ] `docs/environments.md` lists for every tier the Linux user, OpenClaw node, host, port, compose project, commands, data rule and stand-ins. It names the 790 as the test host with user and node `glovebox-test`, `GLOVEBOX_TEST_URL` and `GLOVEBOX_TEST_TOKEN`, and records the production host as open (ADR 0007).
 - [ ] `docs/environments.md` contains the production runbook: the operator, as `frogger`, deploys a `main` commit that is green on test, and verifies it with `env.py check`. It states that tickets and agents never touch production.
 - [ ] `AGENTS.md` points to `docs/environments.md` and `scripts/env.py`.
-- [ ] Proven on a throwaway stack: `up`, `check`, `reset`, `check`, `down` succeed in the factory user's rootless Docker, and `ensure-test` and `install-timer` are exercised as far as a throwaway node allows.
+- [ ] Proven on a throwaway stack: `up`, `check`, `reset`, `check`, `reset`, `check`, `down` succeed in the factory user's rootless Docker. The seeded state is captured after each of the two resets and is identical both times. `ensure-test` and `install-timer` are exercised as far as a throwaway node allows.
