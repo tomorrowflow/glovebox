@@ -15,7 +15,7 @@ Python 3.12 or newer. Run from the repository root.
 | Type check | `.venv/bin/python -m mypy` |
 | Run the service | `.venv/bin/glovebox` |
 
-The service listens on `127.0.0.1:8765`, MCP endpoint `/mcp`; override with `GLOVEBOX_HOST` and `GLOVEBOX_PORT`. CI (`.github/workflows/ci.yml`) runs the install, lint, type check and test commands above.
+The service listens on `127.0.0.1:8765`, MCP endpoint `/mcp`; override with `GLOVEBOX_HOST` and `GLOVEBOX_PORT`. The scaffold has no authentication yet (agent tokens come later), so keep it on loopback. CI (`.github/workflows/ci.yml`) runs the install, lint, type check and test commands above.
 
 Dependencies are pinned exactly in `pyproject.toml`; `constraints.txt` pins the full set. When you change a dependency, update both.
 
