@@ -1,0 +1,15 @@
+# Where the test tier differs from the throwaway tier (ADR 0007): a fixed gate
+# port that nodes reach through GLOVEBOX_TEST_URL, and containers that come back
+# after a reboot.
+#
+# GLOVEBOX_ENV_PUBLISH_PORT exists so the tooling can be exercised on a
+# throwaway host without taking port 8765; the test host leaves it unset.
+
+services:
+  gate:
+    restart: unless-stopped
+    ports: !override
+      - "${GLOVEBOX_ENV_PUBLISH_PORT:-8765}:8765"
+
+  standins:
+    restart: unless-stopped

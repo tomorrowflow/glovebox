@@ -1,0 +1,10 @@
+[Unit]
+Description=Bring the Glovebox test environment to the current origin/main
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+Environment=GLOVEBOX_ENV_TIER=test
+Environment=DOCKER_HOST=unix://%t/docker.sock
+ExecStart=/usr/bin/env python3 @REPO@/scripts/env.py ensure-test
+TimeoutStartSec=15min

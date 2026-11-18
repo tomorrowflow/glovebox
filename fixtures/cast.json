@@ -1,0 +1,67 @@
+{
+  "note": "Fictional fixture cast. Every name, address and number is invented; addresses use the reserved example.test domain and numbers the reserved fictional range 555-0100 to 555-0199. Never put real, pseudonymised or production-copied data here (ADR 0007).",
+  "people": [
+    {"id": "alice", "name": "Alice Example", "email": "alice@example.test", "phone": "+15550100", "role": "the operator in these fixtures"},
+    {"id": "bob", "name": "Bob Sample", "email": "bob@example.test", "phone": "+15550101", "role": "colleague"},
+    {"id": "carol", "name": "Carol Placeholder", "email": "carol@example.test", "phone": "+15550102", "role": "customer"},
+    {"id": "dave", "name": "Dave Fixture", "email": "dave@example.test", "phone": "+15550103", "role": "friend"},
+    {"id": "erin", "name": "Erin Stub", "email": "erin@example.test", "phone": "+15550104", "role": "newsletter sender"}
+  ],
+  "services": {
+    "mailbox-mail": {
+      "account": "alice@example.test",
+      "messages": [
+        {"id": "mb-m1", "from": "bob@example.test", "to": ["alice@example.test"], "subject": "Fixture: weekly sync agenda", "received": "2026-01-05T09:00:00Z", "body": "Fixture body one."},
+        {"id": "mb-m2", "from": "carol@example.test", "to": ["alice@example.test"], "subject": "Fixture: question about an invoice", "received": "2026-01-05T10:30:00Z", "body": "Fixture body two."},
+        {"id": "mb-m3", "from": "erin@example.test", "to": ["alice@example.test"], "subject": "Fixture: monthly newsletter", "received": "2026-01-06T08:00:00Z", "body": "Fixture body three."}
+      ]
+    },
+    "mailbox-calendar": {
+      "account": "alice@example.test",
+      "events": [
+        {"id": "mb-e1", "organizer": "bob@example.test", "title": "Fixture: weekly sync", "start": "2026-01-07T09:00:00Z", "end": "2026-01-07T09:30:00Z"},
+        {"id": "mb-e2", "organizer": "alice@example.test", "title": "Fixture: focus block", "start": "2026-01-07T13:00:00Z", "end": "2026-01-07T15:00:00Z"}
+      ]
+    },
+    "o365-mail": {
+      "account": "alice@example.test",
+      "messages": [
+        {"id": "o3-m1", "from": "dave@example.test", "to": ["alice@example.test"], "subject": "Fixture: lunch on Friday?", "received": "2026-01-05T11:15:00Z", "body": "Fixture body four."},
+        {"id": "o3-m2", "from": "bob@example.test", "to": ["alice@example.test"], "subject": "Fixture: contract draft attached", "received": "2026-01-06T14:45:00Z", "body": "Fixture body five."}
+      ]
+    },
+    "o365-calendar": {
+      "account": "alice@example.test",
+      "events": [
+        {"id": "o3-e1", "organizer": "carol@example.test", "title": "Fixture: customer call", "start": "2026-01-08T10:00:00Z", "end": "2026-01-08T11:00:00Z"},
+        {"id": "o3-e2", "organizer": "dave@example.test", "title": "Fixture: lunch", "start": "2026-01-09T12:00:00Z", "end": "2026-01-09T13:00:00Z"}
+      ]
+    },
+    "signal": {
+      "account": "+15550100",
+      "conversations": [
+        {"id": "sg-c1", "participants": ["+15550100", "+15550103"], "messages": [{"from": "+15550103", "sent": "2026-01-05T18:00:00Z", "text": "Fixture signal message one."}]}
+      ]
+    },
+    "imessage": {
+      "account": "alice@example.test",
+      "conversations": [
+        {"id": "im-c1", "participants": ["alice@example.test", "bob@example.test"], "messages": [{"from": "bob@example.test", "sent": "2026-01-05T19:20:00Z", "text": "Fixture imessage message one."}]}
+      ]
+    },
+    "whatsapp": {
+      "account": "+15550100",
+      "conversations": [
+        {"id": "wa-c1", "participants": ["+15550100", "+15550102"], "messages": [{"from": "+15550102", "sent": "2026-01-06T07:10:00Z", "text": "Fixture whatsapp message one."}]}
+      ]
+    },
+    "inference-local": {
+      "model": "stub-local",
+      "completion": "unknown"
+    },
+    "inference-external": {
+      "model": "stub-external",
+      "completion": "unknown"
+    }
+  }
+}
