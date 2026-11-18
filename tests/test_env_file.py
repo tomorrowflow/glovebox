@@ -34,6 +34,29 @@ def test_a_missing_env_file_is_created_with_a_fresh_private_token(tmp_path: Path
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_creating_the_env_file_leaves_nothing_else_behind(tmp_path: Path) -> None:
+    env = load_env_module()
+
+    env.ensure_env_file(tmp_path / ".env")
+
+    assert [path.name for path in tmp_path.iterdir()] == [".env"]
+
+
+def test_the_local_token_comes_from_the_environment_first_then_the_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = load_env_module()
+    monkeypatch.setattr(env, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.delenv("GLOVEBOX_TEST_TOKEN", raising=False)
+    assert env.read_token("GLOVEBOX_TEST_TOKEN") is None
+
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=from-the-file\n")
+    assert env.read_token("GLOVEBOX_TEST_TOKEN") == "from-the-file"
+
+    monkeypatch.setenv("GLOVEBOX_TEST_TOKEN", "from-the-environment")
+    assert env.read_token("GLOVEBOX_TEST_TOKEN") == "from-the-environment"
+
+
 def test_an_existing_env_file_is_left_alone(tmp_path: Path) -> None:
     env = load_env_module()
     path = tmp_path / ".env"

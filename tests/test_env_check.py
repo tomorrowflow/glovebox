@@ -68,6 +68,21 @@ def test_check_fails_when_the_gate_is_unreachable() -> None:
     assert result.stderr == ""
 
 
+def test_check_prints_only_fixed_text_when_docker_is_missing(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, str(ENV_SCRIPT), "check", "--tier", "throwaway"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={"PATH": str(tmp_path)},
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == "standins: missing\ngate: missing\ncheck: unhealthy\n"
+    assert result.stderr == ""
+
+
 def test_check_fails_when_the_endpoint_is_not_the_gate(not_the_gate: str) -> None:
     result = run_env("check", "--url", not_the_gate)
 

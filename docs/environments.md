@@ -10,7 +10,7 @@ Glovebox has three tiers (ADR 0007). Each runs under its own Linux identity, so 
 | OpenClaw node | the ticket's factory node | `glovebox-test` | none |
 | Host | the factory node's host | the 790 | **open**: not chosen (ADR 0007) |
 | Port | a free loopback port, chosen by Docker | **8765** | operator's choice, once the host is chosen |
-| Compose project | `glovebox-<8 hex digits of the checkout path>` | `glovebox-test` | none: the operator's own deployment, not `scripts/env.py` |
+| Compose project | `glovebox-<8 hex digits of the checkout path>` | `glovebox-test` | none: the operator's own deployment; only `env.py check --url` is used |
 | Compose files | `compose.yaml` | `compose.yaml` + `compose.test.yaml` | not applicable |
 | Who touches it | the ticket | the timer `glovebox-test-env.timer` | the operator only |
 | What runs | the ticket's own checkout, in rootless Docker | only `origin/main`, in rootless Docker, long-lived | a `main` commit that is green on test |
@@ -27,12 +27,12 @@ Nobody reaches a tier above their own. Tickets and agents never touch production
 | Test | `python3 scripts/env.py up`, `check`, `reset`, `down`, `ensure-test`, `install-timer` (as `glovebox-test`; the tier is detected from the user) |
 | Production | the runbook below |
 
-`scripts/env.py` is stdlib-only Python and needs `docker compose` (rootless Docker) and `git`.
+`scripts/env.py` is stdlib-only Python and needs `docker compose` 2.24 or newer (rootless Docker; the test override uses `!override`) and `git`.
 
 | Command | What it does |
 |---------|--------------|
 | `up` | Creates `.env` with a freshly generated `GLOVEBOX_TEST_TOKEN` if the file is missing (and leaves an existing file alone), runs `docker compose pull`, builds the gate image, seeds the fixture cast, and starts the stack. Safe to repeat. |
-| `check` | Exits 0 when the stand-ins are healthy and the gate answers an MCP `initialize` as `glovebox`; exits 1 otherwise. Prints fixed status words only (`ok`, `unreachable`, `unhealthy`, `missing`), never a response body, an error message or a secret. `--url URL` checks a gate at that MCP URL instead of the local stack; the bearer token comes from `GLOVEBOX_TEST_TOKEN`, or from the variable named by `--token-env`. |
+| `check` | Exits 0 when the stand-ins are healthy and the gate answers an MCP `initialize` as `glovebox`; exits 1 otherwise. Prints fixed status words only (`ok`, `unreachable`, `unhealthy`, `missing`), never a response body, an error message or a secret. `--url URL` checks a gate at that MCP URL instead of the local stack; the bearer token then comes from the environment variable `GLOVEBOX_TEST_TOKEN`, or from the one named by `--token-env`. Without `--url` the token comes from the environment, else from `.env`. |
 | `reset` | Reseeds the fictional fixture cast from `fixtures/cast.json`. Seeding twice gives byte-identical state. |
 | `down` | Removes the containers, network and volumes. `.env` stays, so the token survives. |
 | `ensure-test` | Test tier only. Fetches `origin/main`, moves the checkout to it, runs `up` and then `check` with the updated script. Safe to run repeatedly; it exits without effect if another run holds `.env.lock`, and it refuses to run if the checkout has local changes. |
@@ -48,7 +48,7 @@ Environment knobs: `GLOVEBOX_ENV_TIER` (`throwaway` or `test`) overrides the det
 - `standins`: the stand-ins, one listener per outside service (`deploy/standins/standins.py`).
 - `seed`: a one-shot job that writes the fixture cast into the `state` volume (`deploy/standins/seed.py`).
 
-The gate has no authentication yet (agent tokens come with ticket 07), so `GLOVEBOX_TEST_TOKEN` is generated, passed to the gate and sent by `check`, but not yet enforced. The test tier publishes the port on all interfaces so that other nodes can reach it; that is acceptable only because it holds fictional fixtures and nothing else.
+The gate has no authentication yet (agent tokens come with ticket 07), so `GLOVEBOX_TEST_TOKEN`, the test environment's stand-in for an agent token, is generated, passed to the gate and sent by `check`, but not yet enforced. The test tier publishes the port on all interfaces so that other nodes can reach it; that is acceptable only because it holds fictional fixtures and nothing else.
 
 ### Environment names
 

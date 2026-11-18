@@ -60,13 +60,31 @@ def project_name(tier: str) -> str:
 
 def ensure_env_file(path: Path) -> bool:
     """Create the env file with a fresh test token; leave an existing file alone."""
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return False
+    # Write a private temporary file, then link it into place: the env file
+    # appears complete or not at all, and an existing file is never replaced.
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as handle:
         handle.write(f"{TOKEN_VAR}={secrets.token_urlsafe(32)}\n")
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        return False
+    finally:
+        temporary.unlink()
     return True
+
+
+def read_token(name: str) -> str | None:
+    """The token from the environment, else from the env file."""
+    token = os.environ.get(name)
+    if token or not ENV_FILE.exists():
+        return token
+    for line in ENV_FILE.read_text().splitlines():
+        key, _, value = line.partition("=")
+        if key == name:
+            return value or None
+    return None
 
 
 def compose_command(tier: str, *args: str) -> list[str]:
@@ -86,14 +104,13 @@ def compose(tier: str, *args: str, capture: bool = False) -> subprocess.Complete
     if not ENV_FILE.exists():
         env.setdefault(TOKEN_VAR, "unused")
     sys.stdout.flush()  # keep our lines in order with compose's output
-    return subprocess.run(
-        compose_command(tier, *args),
-        cwd=REPO,
-        env=env,
-        text=True,
-        capture_output=capture,
-        check=False,
-    )
+    command = compose_command(tier, *args)
+    try:
+        return subprocess.run(
+            command, cwd=REPO, env=env, text=True, capture_output=capture, check=False
+        )
+    except OSError:  # no docker on PATH
+        return subprocess.CompletedProcess(command, 127, "", "")
 
 
 def step(label: str, result: subprocess.CompletedProcess[str]) -> bool:
@@ -191,11 +208,14 @@ def stack_status(tier: str) -> dict[str, str]:
     rows: list[dict[str, object]] = []
     if result.returncode == 0:
         text = result.stdout.strip()
-        if text.startswith("["):
-            rows = json.loads(text)
-        else:
-            rows = [json.loads(line) for line in text.splitlines() if line.strip()]
-    found = {str(row.get("Service")): row for row in rows}
+        try:
+            if text.startswith("["):
+                rows = json.loads(text)
+            else:
+                rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+        except ValueError:
+            rows = []
+    found = {str(row.get("Service")): row for row in rows if isinstance(row, dict)}
     status: dict[str, str] = {}
     for name in STACK_SERVICES:
         row = found.get(name)
@@ -218,12 +238,12 @@ def local_gate_url(tier: str) -> str | None:
 
 
 def command_check(args: argparse.Namespace) -> int:
-    token = os.environ.get(args.token_env)
     standins = "ok"
     if args.url is not None:
-        gate = probe_gate(args.url, token)
+        gate = probe_gate(args.url, os.environ.get(args.token_env))
     else:
         tier = resolve_tier(args.tier)
+        token = read_token(TOKEN_VAR)
         status = stack_status(tier)
         standins = status["standins"]
         url = local_gate_url(tier)
@@ -290,8 +310,11 @@ def command_install_timer(args: argparse.Namespace) -> int:
     (unit_dir / TIMER).write_text((UNIT_SOURCE / TIMER).read_text())
     if args.enable:
         for command in (["daemon-reload"], ["enable", "--now", TIMER]):
-            result = subprocess.run(["systemctl", "--user", *command], check=False)
-            if result.returncode != 0:
+            try:
+                code = subprocess.run(["systemctl", "--user", *command], check=False).returncode
+            except OSError:  # no systemctl on PATH
+                code = 127
+            if code != 0:
                 print("install-timer: systemctl failed")
                 return 1
     print("install-timer: ok")
