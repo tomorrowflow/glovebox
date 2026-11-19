@@ -82,7 +82,11 @@ def read_token(name: str) -> str | None:
     token = os.environ.get(name)
     if token or not ENV_FILE.exists():
         return token
-    for line in ENV_FILE.read_text().splitlines():
+    try:
+        lines = ENV_FILE.read_text().splitlines()
+    except (OSError, ValueError):  # unreadable, or not text
+        return None
+    for line in lines:
         key, _, value = line.partition("=")
         if key == name:
             return value or None
@@ -199,7 +203,7 @@ def _is_glovebox_initialize(body: str) -> bool:
         text = line.removeprefix("data:").strip() if line.startswith("data:") else line.strip()
         try:
             message = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):  # not JSON, or nested too deeply to parse
             continue
         if isinstance(message, dict):
             result = message.get("result")

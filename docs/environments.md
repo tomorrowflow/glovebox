@@ -9,7 +9,7 @@ Glovebox has three tiers (ADR 0007). Each runs under its own Linux identity, so 
 | Linux user | `factory` | `glovebox-test` | `frogger` |
 | OpenClaw node | the ticket's factory node | `glovebox-test` | none |
 | Host | the factory node's host | the 790 | **open**: not chosen (ADR 0007) |
-| Port | a free loopback port, chosen by Docker | **8765**, on loopback until the operator sets `GLOVEBOX_ENV_BIND` | operator's choice, once the host is chosen |
+| Port | a free loopback port, chosen by Docker | **8765**, on loopback only (see Data rule below) | operator's choice, once the host is chosen |
 | Compose project | `glovebox-<8 hex digits of the checkout path>` | `glovebox-test` | none: the operator's own deployment; only `env.py check --url` is used |
 | Compose files | `compose.yaml` | `compose.yaml` + `compose.test.yaml` | not applicable |
 | Who touches it | the ticket | the timer `glovebox-test-env.timer` | the operator only |
@@ -38,17 +38,17 @@ Nobody reaches a tier above their own. Tickets and agents never touch production
 | `ensure-test` | Test tier only. Fetches `origin/main`, moves the checkout to it, runs `up` and then `check` with the updated script. Safe to run repeatedly; it exits without effect if another run holds `.env.lock`, and it refuses to run if the checkout has local changes. |
 | `install-timer` | Test tier only. Writes `glovebox-test-env.service` and `glovebox-test-env.timer` into `~/.config/systemd/user/` (units in `deploy/systemd/`), reloads systemd and runs `systemctl --user enable --now glovebox-test-env.timer`. The timer runs `ensure-test` 30 seconds after it starts and then every 5 minutes. `--no-enable --unit-dir DIR` only writes the units, and works on any tier. |
 
-Environment knobs: `GLOVEBOX_ENV_TIER` (`throwaway` or `test`) overrides the detected tier, `GLOVEBOX_ENV_PROJECT` the compose project name, and `GLOVEBOX_ENV_PUBLISH_PORT` the test tier's published port (default 8765). The first three exist so the tooling can be exercised on a throwaway host without touching the long-lived test stack. `GLOVEBOX_ENV_BIND` is the address the test tier publishes the gate on (default `127.0.0.1`); the operator sets it in `.env` (see below).
+Environment knobs: `GLOVEBOX_ENV_TIER` (`throwaway` or `test`) overrides the detected tier, `GLOVEBOX_ENV_PROJECT` the compose project name, and `GLOVEBOX_ENV_PUBLISH_PORT` the test tier's published port (default 8765). They exist so the tooling can be exercised on a throwaway host without touching the long-lived test stack.
 
 ## The stack
 
-`compose.yaml` holds three services; `compose.test.yaml` is the override where test differs (fixed port 8765, `restart: unless-stopped`). Both publish on loopback by default, because the gate has no authentication yet.
+`compose.yaml` holds three services; `compose.test.yaml` is the override where test differs (fixed port 8765, `restart: unless-stopped`). Both publish the gate on loopback only, because it has no authentication yet.
 
 - `gate`: the Glovebox service, built from `deploy/Dockerfile.gate`, listening on 8765 in the container. Throwaway publishes it on a free loopback port; `check` finds it with `docker compose port`.
 - `standins`: the stand-ins, one listener per outside service (`deploy/standins/standins.py`).
 - `seed`: a one-shot job that writes the fixture cast into the `state` volume (`deploy/standins/seed.py`).
 
-The gate has no authentication yet (agent tokens come with ticket 07), so `GLOVEBOX_TEST_TOKEN`, the test environment's stand-in for an agent token, is generated, passed to the gate and sent by `check`, but not yet enforced. For that reason the test tier publishes 8765 on loopback of the 790 until the operator decides otherwise. The tooling never opens the port wider by itself. The operator can publish it on an address of the 790 by setting `GLOVEBOX_ENV_BIND=<that address>` in the test node's `.env` and rerunning `up`. That alone does not let other hosts use `GLOVEBOX_TEST_URL` yet: the gate's MCP transport answers `421 Misdirected Request` to any `Host` header other than `localhost`, `127.0.0.1` or `[::1]` (DNS-rebinding protection), so a request addressed to the 790 is refused. Allowing the 790's host name is a change to the gate, which this ticket does not make; it needs its own ticket before nodes on other hosts can run `check --url "$GLOVEBOX_TEST_URL"`.
+The gate has no authentication yet (agent tokens come with ticket 07), so `GLOVEBOX_TEST_TOKEN`, the test environment's stand-in for an agent token, is generated, passed to the gate and sent by `check`, but not yet enforced. For that reason the test tier publishes 8765 on loopback of the 790 only, and `scripts/env.py` has no way to widen it. Nodes on other hosts cannot reach `GLOVEBOX_TEST_URL` yet. Two gate-side changes come first, and this ticket makes neither: a setting for the address the gate is published on, and an allowed-hosts setting, because the gate's MCP transport answers `421 Misdirected Request` to any `Host` header other than `localhost`, `127.0.0.1` or `[::1]` (DNS-rebinding protection). They need their own ticket, before ticket 03's last item can pass.
 
 ### Environment names
 
@@ -56,8 +56,6 @@ The gate has no authentication yet (agent tokens come with ticket 07), so `GLOVE
 |------|-------|---------|
 | `GLOVEBOX_TEST_TOKEN` | `.env` on the stack's host; node profile | The test token. Generated on the node that runs the stack; never committed. |
 | `GLOVEBOX_TEST_URL` | node profile | The MCP URL of the test environment: `http://<the 790>:8765/mcp`. Set by the operator. |
-| `GLOVEBOX_ENV_BIND` | `.env` on the test node | Optional. The address of the 790 the gate is published on; unset means `127.0.0.1`. Set by the operator; see the Host-header limit above. |
-
 Nodes that use the test environment read `GLOVEBOX_TEST_URL` and `GLOVEBOX_TEST_TOKEN`. To check it from another node: `python3 scripts/env.py check --url "$GLOVEBOX_TEST_URL"` (this works once the gate allows the 790's host, see above). On the 790 itself, `python3 scripts/env.py check` as `glovebox-test` always works.
 
 ## Data rule

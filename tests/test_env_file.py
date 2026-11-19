@@ -57,6 +57,22 @@ def test_the_local_token_comes_from_the_environment_first_then_the_env_file(
     assert env.read_token("GLOVEBOX_TEST_TOKEN") == "from-the-environment"
 
 
+def test_an_unreadable_env_file_gives_no_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = load_env_module()
+    monkeypatch.setattr(env, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.delenv("GLOVEBOX_TEST_TOKEN", raising=False)
+    (tmp_path / ".env").write_bytes(b"\xff\xfe\x00 not text")
+
+    assert env.read_token("GLOVEBOX_TEST_TOKEN") is None
+
+    (tmp_path / ".env").unlink()
+    (tmp_path / ".env").mkdir()  # a directory where the file should be
+
+    assert env.read_token("GLOVEBOX_TEST_TOKEN") is None
+
+
 def test_an_existing_env_file_is_left_alone(tmp_path: Path) -> None:
     env = load_env_module()
     path = tmp_path / ".env"
