@@ -97,6 +97,7 @@ def test_check_fails_when_the_gate_is_unreachable() -> None:
 def with_changes(
     base: dict[str, object], drop: tuple[str, ...], changes: dict[str, object]
 ) -> dict[str, object]:
+    """A copy of `base` with `changes` applied, then the keys in `drop` removed."""
     changed = {**base, **changes}
     for key in drop:
         del changed[key]
@@ -104,7 +105,7 @@ def with_changes(
 
 
 def server_info(*, drop: tuple[str, ...] = (), **changes: object) -> dict[str, object]:
-    """A valid `serverInfo` (an MCP Implementation: name and version), with one defect."""
+    """A valid `serverInfo` (an MCP Implementation: name and version), with changes applied."""
     return with_changes({"name": "glovebox", "version": "0"}, drop, changes)
 
 
