@@ -117,8 +117,19 @@ def initialize_reply(**changes: object) -> bytes:
         json.dumps(json.loads(initialize_reply()), indent=2).encode(),
         b"event: message\ndata: " + initialize_reply() + b"\n\n",
         b": comment\n\nevent: message\r\ndata: " + initialize_reply() + b"\r\n\r\n",
+        b"id: 7\nevent: message\ndata: " + initialize_reply() + b"\n\n",
+        b'event: message\ndata: {"jsonrpc": "2.0", "method": "notifications/message"}\n\n'
+        b"event: message\ndata: " + initialize_reply() + b"\n\n",
     ],
-    ids=["json", "json-newline", "json-indented", "sse", "sse-comment-crlf"],
+    ids=[
+        "json",
+        "json-newline",
+        "json-indented",
+        "sse",
+        "sse-comment-crlf",
+        "sse-id",
+        "sse-notification-first",
+    ],
 )
 def test_check_accepts_a_well_formed_initialize_reply(body: bytes) -> None:
     with answering_with(body) as url:

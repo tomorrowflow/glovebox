@@ -196,7 +196,9 @@ def probe_gate(url: str, token: str | None) -> str:
     except (http.client.HTTPException, ValueError):
         # A reply that is not valid HTTP, or a URL that does not parse.
         return "unhealthy"
-    return "ok" if _is_glovebox_initialize(body) else "unhealthy"
+    return (
+        "ok" if any(_is_initialize_reply(message) for message in _messages(body)) else "unhealthy"
+    )
 
 
 def _parse_json(text: str) -> object | None:
@@ -235,10 +237,6 @@ def _is_initialize_reply(message: object) -> bool:
         and isinstance(info, dict)
         and info.get("name") == "glovebox"
     )
-
-
-def _is_glovebox_initialize(body: str) -> bool:
-    return any(_is_initialize_reply(message) for message in _messages(body))
 
 
 def stack_status(tier: str) -> dict[str, str]:
