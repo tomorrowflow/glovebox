@@ -38,6 +38,7 @@ TIMER = "glovebox-test-env.timer"
 SERVICE = "glovebox-test-env.service"
 TIERS = ("throwaway", "test")
 STACK_SERVICES = ("gate", "standins")
+INITIALIZE_ID = 1  # the JSON-RPC id of the initialize request `check` sends
 
 Handler = Callable[[argparse.Namespace], int]
 
@@ -166,7 +167,7 @@ def probe_gate(url: str, token: str | None) -> str:
     """Send an MCP initialize request; return ok, unreachable or unhealthy."""
     payload = {
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": INITIALIZE_ID,
         "method": "initialize",
         "params": {
             "protocolVersion": "2025-06-18",
@@ -198,19 +199,46 @@ def probe_gate(url: str, token: str | None) -> str:
     return "ok" if _is_glovebox_initialize(body) else "unhealthy"
 
 
+def _parse_json(text: str) -> object | None:
+    try:
+        parsed: object = json.loads(text)
+    except (ValueError, RecursionError):  # not JSON, or nested too deeply to parse
+        return None
+    return parsed
+
+
+def _messages(body: str) -> list[object]:
+    """The JSON messages in a reply: the whole body, or the `data:` lines of an event stream."""
+    whole = _parse_json(body)
+    if whole is not None:
+        return [whole]
+    lines = (line.removeprefix("data:") for line in body.splitlines() if line.startswith("data:"))
+    return [message for message in map(_parse_json, lines) if message is not None]
+
+
+def _is_initialize_reply(message: object) -> bool:
+    """True for a successful JSON-RPC reply to our initialize request, from `glovebox`."""
+    if not isinstance(message, dict):
+        return False
+    request_id = message.get("id")
+    if message.get("jsonrpc") != "2.0" or type(request_id) is not int or "error" in message:
+        return False
+    if request_id != INITIALIZE_ID:
+        return False
+    result = message.get("result")
+    if not isinstance(result, dict):
+        return False
+    info = result.get("serverInfo")
+    return (
+        isinstance(result.get("protocolVersion"), str)
+        and isinstance(result.get("capabilities"), dict)
+        and isinstance(info, dict)
+        and info.get("name") == "glovebox"
+    )
+
+
 def _is_glovebox_initialize(body: str) -> bool:
-    for line in body.splitlines():
-        text = line.removeprefix("data:").strip() if line.startswith("data:") else line.strip()
-        try:
-            message = json.loads(text)
-        except (ValueError, RecursionError):  # not JSON, or nested too deeply to parse
-            continue
-        if isinstance(message, dict):
-            result = message.get("result")
-            if isinstance(result, dict):
-                info = result.get("serverInfo")
-                return isinstance(info, dict) and info.get("name") == "glovebox"
-    return False
+    return any(_is_initialize_reply(message) for message in _messages(body))
 
 
 def stack_status(tier: str) -> dict[str, str]:

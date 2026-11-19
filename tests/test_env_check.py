@@ -1,5 +1,6 @@
 """`scripts/env.py check` against a gate URL (ADR 0007)."""
 
+import json
 import socket
 import subprocess
 import sys
@@ -93,6 +94,39 @@ def test_check_fails_when_the_gate_is_unreachable() -> None:
     assert_status(result, 1, "gate: unreachable\ncheck: unhealthy\n")
 
 
+def initialize_reply(**changes: object) -> bytes:
+    """A well-formed reply to the initialize request `check` sends, with changes applied."""
+    reply: dict[str, object] = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "serverInfo": {"name": "glovebox", "version": "0"},
+        },
+    }
+    reply.update(changes)
+    return json.dumps(reply).encode()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        initialize_reply(),
+        initialize_reply() + b"\n",
+        json.dumps(json.loads(initialize_reply()), indent=2).encode(),
+        b"event: message\ndata: " + initialize_reply() + b"\n\n",
+        b": comment\n\nevent: message\r\ndata: " + initialize_reply() + b"\r\n\r\n",
+    ],
+    ids=["json", "json-newline", "json-indented", "sse", "sse-comment-crlf"],
+)
+def test_check_accepts_a_well_formed_initialize_reply(body: bytes) -> None:
+    with answering_with(body) as url:
+        result = run_env("check", "--url", url)
+
+    assert_status(result, 0, "gate: ok\ncheck: healthy\n")
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -101,8 +135,43 @@ def test_check_fails_when_the_gate_is_unreachable() -> None:
         b'{"result": {"serverInfo": 5}}',
         b"[" * 60000,  # nested deeply enough to exhaust the JSON parser's recursion limit
         b"\xff\xfe not text",
+        # Names glovebox but is not a reply to our initialize request:
+        b'{"result": {"serverInfo": {"name": "glovebox"}}}',
+        initialize_reply(jsonrpc="1.0"),
+        initialize_reply(id=2),
+        initialize_reply(id="1"),
+        initialize_reply(id=True),
+        initialize_reply(result={"capabilities": {}, "serverInfo": {"name": "glovebox"}}),
+        initialize_reply(
+            result={"protocolVersion": 1, "capabilities": {}, "serverInfo": {"name": "glovebox"}}
+        ),
+        initialize_reply(
+            result={"protocolVersion": "2025-06-18", "serverInfo": {"name": "glovebox"}}
+        ),
+        initialize_reply(error={"code": -32600, "message": "glovebox says no"}),
+        b'{"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "glovebox"}}',
+        b"[" + initialize_reply() + b"]",  # a batch is not a reply to a single request
+        b'{"method": "notifications/message", "params": {"serverInfo": {"name": "glovebox"}}}',
     ],
-    ids=["web-page", "other-server", "wrong-shape", "deeply-nested", "not-utf8"],
+    ids=[
+        "web-page",
+        "other-server",
+        "wrong-shape",
+        "deeply-nested",
+        "not-utf8",
+        "name-only",
+        "wrong-jsonrpc-version",
+        "wrong-id",
+        "string-id",
+        "bool-id",
+        "no-protocol-version",
+        "non-string-protocol-version",
+        "no-capabilities",
+        "result-and-error",
+        "error-only",
+        "batch",
+        "notification",
+    ],
 )
 def test_check_fails_when_the_endpoint_is_not_the_gate(body: bytes) -> None:
     with answering_with(body) as url:
