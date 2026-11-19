@@ -2,6 +2,10 @@
 # port that nodes reach through GLOVEBOX_TEST_URL, and containers that come back
 # after a reboot.
 #
+# The gate has no authentication yet, so the port is published on loopback only.
+# The operator widens it for other nodes by setting GLOVEBOX_ENV_BIND (an address
+# of the test host) in the gitignored .env, once that is decided (ticket 03).
+#
 # GLOVEBOX_ENV_PUBLISH_PORT exists so the tooling can be exercised on a
 # throwaway host without taking port 8765; the test host leaves it unset.
 
@@ -9,7 +13,7 @@ services:
   gate:
     restart: unless-stopped
     ports: !override
-      - "${GLOVEBOX_ENV_PUBLISH_PORT:-8765}:8765"
+      - "${GLOVEBOX_ENV_BIND:-127.0.0.1}:${GLOVEBOX_ENV_PUBLISH_PORT:-8765}:8765"
 
   standins:
     restart: unless-stopped

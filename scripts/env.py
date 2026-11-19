@@ -12,12 +12,14 @@ import argparse
 import fcntl
 import getpass
 import hashlib
+import http.client
 import json
 import os
 import secrets
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -174,16 +176,21 @@ def probe_gate(url: str, token: str | None) -> str:
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers=headers, method="POST"
-    )
     try:
+        if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+            return "unhealthy"
+        request = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers=headers, method="POST"
+        )
         with urllib.request.urlopen(request, timeout=10) as response:
             body = response.read(65536).decode("utf-8", "replace")
     except urllib.error.HTTPError:
         return "unhealthy"
     except (urllib.error.URLError, OSError):
         return "unreachable"
+    except (http.client.HTTPException, ValueError):
+        # A reply that is not valid HTTP, or a URL that does not parse.
+        return "unhealthy"
     return "ok" if _is_glovebox_initialize(body) else "unhealthy"
 
 

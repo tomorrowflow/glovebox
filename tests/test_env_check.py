@@ -49,6 +49,47 @@ def not_the_gate() -> Iterator[str]:
         server.server_close()
 
 
+@pytest.fixture
+def speaks_garbage() -> Iterator[str]:
+    """A listener that answers every connection with bytes that are not HTTP."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+
+    def answer() -> None:
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return
+            with connection:
+                connection.recv(65536)
+                connection.sendall(b"this is not http\r\n\r\n")
+
+    threading.Thread(target=answer, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{listener.getsockname()[1]}/mcp"
+    finally:
+        listener.close()
+
+
+def test_check_reports_unhealthy_when_the_reply_is_not_http(speaks_garbage: str) -> None:
+    result = run_env("check", "--url", speaks_garbage)
+
+    assert result.returncode == 1
+    assert result.stdout == "gate: unhealthy\ncheck: unhealthy\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("url", ["not a url", "ftp://127.0.0.1/mcp", "http://[::1"])
+def test_check_reports_unhealthy_for_a_malformed_url(url: str) -> None:
+    result = run_env("check", "--url", url)
+
+    assert result.returncode == 1
+    assert result.stdout == "gate: unhealthy\ncheck: unhealthy\n"
+    assert result.stderr == ""
+
+
 def test_check_passes_against_a_running_gate(gate: RunningGate) -> None:
     result = run_env("check", "--url", gate.url)
 
