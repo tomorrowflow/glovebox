@@ -100,6 +100,54 @@ def test_reseeding_restores_state_that_drifted(tmp_path: Path) -> None:
     assert run_seed(tmp_path, "--dump").stdout == expected
 
 
+def load_seed() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("glovebox_seed", SEED)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_overlapping_seeds_do_not_fail_or_corrupt_the_state(tmp_path: Path) -> None:
+    """A manual reset can overlap the timer's reseed; both must finish and agree."""
+    seed = load_seed()
+    seed.seed(CAST, tmp_path)
+    expected = seed.dump(tmp_path)
+    failures: list[BaseException] = []
+
+    def reseed_repeatedly(worker: int) -> None:
+        try:
+            for round_number in range(30):
+                # Different content to restore each time, so every seed has files to write.
+                (tmp_path / "signal.json").write_text(
+                    f'{{"worker": {worker}, "round": {round_number}}}'
+                )
+                seed.seed(CAST, tmp_path)
+        except BaseException as error:
+            failures.append(error)
+
+    workers = [threading.Thread(target=reseed_repeatedly, args=(n,)) for n in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert failures == []
+    seed.seed(CAST, tmp_path)
+    assert seed.dump(tmp_path) == expected
+
+
+def test_seeding_leaves_no_temporary_files_behind(tmp_path: Path) -> None:
+    run_seed(tmp_path)
+    (tmp_path / "signal.json.tmp").write_text("left over from a seed that crashed")
+    (tmp_path / "signal.json").write_text('{"drifted": true}')
+
+    run_seed(tmp_path)
+
+    assert [path.name for path in tmp_path.glob("*.tmp")] == []
+    assert not (tmp_path / "signal.json.tmp").exists()
+
+
 def test_every_outside_service_has_seeded_fixtures(tmp_path: Path) -> None:
     run_seed(tmp_path)
 

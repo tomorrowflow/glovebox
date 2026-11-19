@@ -6,12 +6,16 @@ cast does not name are removed.
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 MANIFEST = "manifest.json"
+LOCK = ".seed.lock"
 
 
 def canonical(value: object) -> bytes:
@@ -35,20 +39,33 @@ def write_if_changed(path: Path, content: bytes) -> None:
     os.replace(temporary, path)
 
 
+@contextmanager
+def exclusive(state: Path) -> Iterator[None]:
+    """Hold the state directory's lock, so overlapping seeds run one after the other.
+
+    A manual reset can overlap the timer's reseed, in a second container on the
+    same volume; they share temporary file names and the stale-file cleanup.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / LOCK).open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def seed(fixtures: Path, state: Path) -> None:
     files = build_files(json.loads(fixtures.read_text()))
     digests = {name: hashlib.sha256(content).hexdigest() for name, content in files.items()}
     overall = hashlib.sha256(canonical(digests)).hexdigest()
     files[MANIFEST] = canonical({"files": digests, "state_sha256": overall})
-    state.mkdir(parents=True, exist_ok=True)
-    for stale in state.iterdir():
-        if stale.name not in files:
-            stale.unlink()
-    for name, content in files.items():
-        if name != MANIFEST:
-            write_if_changed(state / name, content)
-    # The manifest goes last: its presence means the state is complete.
-    write_if_changed(state / MANIFEST, files[MANIFEST])
+    with exclusive(state):
+        for stale in state.iterdir():
+            if stale.name not in files and stale.name != LOCK:
+                stale.unlink()
+        for name, content in files.items():
+            if name != MANIFEST:
+                write_if_changed(state / name, content)
+        # The manifest goes last: its presence means the state is complete.
+        write_if_changed(state / MANIFEST, files[MANIFEST])
 
 
 def dump(state: Path) -> str:
