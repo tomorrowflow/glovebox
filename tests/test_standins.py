@@ -48,12 +48,16 @@ def run_seed(state: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def load_standins() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("glovebox_standins", STANDINS)
+def load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_standins() -> ModuleType:
+    return load_module("glovebox_standins", STANDINS)
 
 
 @contextmanager
@@ -100,17 +104,9 @@ def test_reseeding_restores_state_that_drifted(tmp_path: Path) -> None:
     assert run_seed(tmp_path, "--dump").stdout == expected
 
 
-def load_seed() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("glovebox_seed", SEED)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_overlapping_seeds_do_not_fail_or_corrupt_the_state(tmp_path: Path) -> None:
     """A manual reset can overlap the timer's reseed; both must finish and agree."""
-    seed = load_seed()
+    seed = load_module("glovebox_seed", SEED)
     seed.seed(CAST, tmp_path)
     expected = seed.dump(tmp_path)
     failures: list[BaseException] = []
