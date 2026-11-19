@@ -94,17 +94,33 @@ def test_check_fails_when_the_gate_is_unreachable() -> None:
     assert_status(result, 1, "gate: unreachable\ncheck: unhealthy\n")
 
 
+def with_changes(
+    base: dict[str, object], drop: tuple[str, ...], changes: dict[str, object]
+) -> dict[str, object]:
+    changed = {**base, **changes}
+    for key in drop:
+        del changed[key]
+    return changed
+
+
+def server_info(*, drop: tuple[str, ...] = (), **changes: object) -> dict[str, object]:
+    """A valid `serverInfo` (an MCP Implementation: name and version), with one defect."""
+    return with_changes({"name": "glovebox", "version": "0"}, drop, changes)
+
+
+def initialize_result(*, drop: tuple[str, ...] = (), **changes: object) -> dict[str, object]:
+    """A valid MCP InitializeResult, with changes applied."""
+    valid: dict[str, object] = {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "serverInfo": server_info(),
+    }
+    return with_changes(valid, drop, changes)
+
+
 def initialize_reply(**changes: object) -> bytes:
     """A well-formed reply to the initialize request `check` sends, with changes applied."""
-    reply: dict[str, object] = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "serverInfo": {"name": "glovebox", "version": "0"},
-        },
-    }
+    reply: dict[str, object] = {"jsonrpc": "2.0", "id": 1, "result": initialize_result()}
     reply.update(changes)
     return json.dumps(reply).encode()
 
@@ -152,13 +168,16 @@ def test_check_accepts_a_well_formed_initialize_reply(body: bytes) -> None:
         initialize_reply(id=2),
         initialize_reply(id="1"),
         initialize_reply(id=True),
-        initialize_reply(result={"capabilities": {}, "serverInfo": {"name": "glovebox"}}),
-        initialize_reply(
-            result={"protocolVersion": 1, "capabilities": {}, "serverInfo": {"name": "glovebox"}}
-        ),
-        initialize_reply(
-            result={"protocolVersion": "2025-06-18", "serverInfo": {"name": "glovebox"}}
-        ),
+        initialize_reply(result=initialize_result(drop=("protocolVersion",))),
+        initialize_reply(result=initialize_result(protocolVersion=1)),
+        initialize_reply(result=initialize_result(drop=("capabilities",))),
+        initialize_reply(result=initialize_result(capabilities=[])),
+        initialize_reply(result=initialize_result(drop=("serverInfo",))),
+        initialize_reply(result=initialize_result(serverInfo="glovebox")),
+        initialize_reply(result=initialize_result(serverInfo=server_info(drop=("name",)))),
+        initialize_reply(result=initialize_result(serverInfo=server_info(name="other"))),
+        initialize_reply(result=initialize_result(serverInfo=server_info(drop=("version",)))),
+        initialize_reply(result=initialize_result(serverInfo=server_info(version=1))),
         initialize_reply(error={"code": -32600, "message": "glovebox says no"}),
         b'{"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "glovebox"}}',
         b"[" + initialize_reply() + b"]",  # a batch is not a reply to a single request
@@ -178,6 +197,13 @@ def test_check_accepts_a_well_formed_initialize_reply(body: bytes) -> None:
         "no-protocol-version",
         "non-string-protocol-version",
         "no-capabilities",
+        "non-dict-capabilities",
+        "no-server-info",
+        "non-dict-server-info",
+        "no-server-name",
+        "other-server-name",
+        "no-server-version",
+        "non-string-server-version",
         "result-and-error",
         "error-only",
         "batch",

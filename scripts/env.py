@@ -236,6 +236,7 @@ def _is_initialize_reply(message: object) -> bool:
         and isinstance(result.get("capabilities"), dict)
         and isinstance(info, dict)
         and info.get("name") == "glovebox"
+        and isinstance(info.get("version"), str)
     )
 
 
