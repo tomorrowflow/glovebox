@@ -31,6 +31,8 @@
     {"id": "env", "file": "src/glovebox/__main__.py", "line": 14, "note": "Defaults 127.0.0.1:8765 at lines 9-10."},
     {"id": "server", "file": "src/glovebox/server.py", "line": 14},
     {"id": "client>uvicorn", "file": "tests/conftest.py", "line": 49},
+    {"id": "uvicorn>app", "file": "src/glovebox/__main__.py", "line": 16, "note": "create_app() is passed to uvicorn.run, which serves it."},
+    {"id": "env>main", "file": "src/glovebox/__main__.py", "line": 14, "note": "main() reads GLOVEBOX_HOST at line 14 and GLOVEBOX_PORT at line 15."},
     {"id": "app>mcp", "file": "src/glovebox/server.py", "line": 15, "note": "The app is built from the MCP server, so its /mcp route reaches the server."},
     {"id": "main>uvicorn", "file": "src/glovebox/__main__.py", "line": 16},
     {"id": "main>server", "file": "src/glovebox/__main__.py", "line": 16, "note": "create_app() is called in the uvicorn.run argument."},
