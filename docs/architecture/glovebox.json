@@ -1,0 +1,39 @@
+{
+  "type": "architecture",
+  "title": "src/glovebox",
+  "subtitle": "Entry point, MCP server and ASGI app of the gate service",
+  "dir": "LR",
+  "motion": "trace",
+  "nodes": [
+    {"id": "client", "label": "MCP client", "sub": "agent", "kind": "optional", "row": 0, "col": 0},
+    {"id": "uvicorn", "label": "uvicorn", "sub": "ASGI server", "kind": "external", "row": 0, "col": 1},
+    {"id": "app", "label": "HTTP app", "sub": "Starlette, /mcp", "focal": true, "row": 0, "col": 2},
+    {"id": "mcp", "label": "MCPServer", "sub": "no tools yet", "row": 0, "col": 3},
+    {"id": "main", "label": "main()", "sub": "__main__.py", "row": 1, "col": 1},
+    {"id": "env", "label": "Environment", "sub": "GLOVEBOX_HOST, _PORT", "kind": "input", "row": 2, "col": 1},
+    {"id": "server", "label": "create_app()", "sub": "server.py", "row": 1, "col": 2}
+  ],
+  "edges": [
+    {"from": "client", "to": "uvicorn", "label": "Streamable HTTP", "kind": "primary"},
+    {"from": "uvicorn", "to": "app", "label": "serves", "kind": "primary"},
+    {"from": "app", "to": "mcp", "label": "routes", "kind": "primary"},
+    {"from": "env", "to": "main", "label": "host, port"},
+    {"from": "main", "to": "uvicorn", "label": "uvicorn.run"},
+    {"from": "main", "to": "server", "label": "create_app"},
+    {"from": "server", "to": "mcp", "label": "create_server"}
+  ],
+  "evidence": [
+    {"id": "client", "file": "tests/test_tool_list.py", "line": 15, "note": "Only the acceptance test's MCP client connects today; inferred as the agent."},
+    {"id": "uvicorn", "file": "src/glovebox/__main__.py", "line": 16, "note": "uvicorn.run serves the app."},
+    {"id": "app", "file": "src/glovebox/server.py", "line": 15, "note": "streamable_http_app() returns the Starlette app."},
+    {"id": "mcp", "file": "src/glovebox/server.py", "line": 11, "note": "MCPServer named glovebox with no tool registered."},
+    {"id": "main", "file": "src/glovebox/__main__.py", "line": 13},
+    {"id": "env", "file": "src/glovebox/__main__.py", "line": 14, "note": "Defaults 127.0.0.1:8765 at lines 9-10."},
+    {"id": "server", "file": "src/glovebox/server.py", "line": 14},
+    {"id": "client>uvicorn", "file": "tests/conftest.py", "line": 49},
+    {"id": "app>mcp", "file": "src/glovebox/server.py", "line": 15, "note": "The app is built from the MCP server, so its /mcp route reaches the server."},
+    {"id": "main>uvicorn", "file": "src/glovebox/__main__.py", "line": 16},
+    {"id": "main>server", "file": "src/glovebox/__main__.py", "line": 16, "note": "create_app() is called in the uvicorn.run argument."},
+    {"id": "server>mcp", "file": "src/glovebox/server.py", "line": 15}
+  ]
+}

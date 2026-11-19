@@ -25,6 +25,8 @@ Dependencies are pinned exactly in `pyproject.toml`; `constraints.txt` pins the 
 - `docs/adr/`: decisions. ADR 0001 states the guarantee and non-claims, ADR 0006 the one acceptance seam.
 - `docs/prd/gated-agent-data-layer.md`: the spec. Tickets are in `docs/issues/gated-agent-data-layer/`.
 
+Architecture map: docs/architecture/*.json (SeeCode specs, evidence-linked; rules in docs/architecture/README.md).
+
 ## Testing
 
 Acceptance tests drive the service through MCP tool calls with a real MCP client over HTTP (ADR 0006). Tests live in `tests/`.
