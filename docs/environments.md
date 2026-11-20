@@ -8,8 +8,8 @@ Glovebox has three tiers (ADR 0007). Each runs under its own Linux identity, so 
 |---|-----------|------|------------|
 | Linux user | `factory` | `glovebox-test` | `frogger` |
 | OpenClaw node | the ticket's factory node | `glovebox-test` | none |
-| Host | the factory node's host | the 790 | **open**: not chosen (ADR 0007) |
-| Port | a free loopback port, chosen by Docker | **8765**, on loopback only (see Data rule below) | operator's choice, once the host is chosen |
+| Host | the factory node's host | the 790 | `zotac1070` (ADR 0007) |
+| Port | a free loopback port, chosen by Docker | **8765**, on loopback only (see Data rule below) | operator's choice |
 | Compose project | `glovebox-<8 hex digits of the checkout path>` | `glovebox-test` | none: the operator's own deployment; only `env.py check --url` is used |
 | Compose files | `compose.yaml` | `compose.yaml` + `compose.test.yaml` | not applicable |
 | Who touches it | the ticket | the timer `glovebox-test-env.timer` | the operator only |
@@ -88,7 +88,7 @@ The operator decided on 2026-11-15 that `glovebox-test` runs on the 790. The hos
 
 The operator does this as `frogger`. Tickets and agents never touch production: no ticket installs it, no agent holds a production token, and production secrets and upstream credentials exist only on the production host in files that the agents' Linux users cannot read (ADR 0004).
 
-The production host is **open** (ADR 0007). Record it here and in the ADR before the first deployment (ticket 04).
+The production host is `zotac1070` (ADR 0007), chosen by the operator and recorded on 2026-11-20. Nothing is installed there until the operator runs ticket 04.
 
 1. Pick a `main` commit that is green on test: its CI passed, and the test environment has run it (`ensure-test` reports `at <commit>`, and `python3 scripts/env.py check` passes on the test node).
 2. As `frogger` on the production host, check out exactly that commit.

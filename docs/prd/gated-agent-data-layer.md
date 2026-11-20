@@ -220,7 +220,7 @@ Do not weaken this contract silently and do not claim more than it, in code, doc
 
 - As ADR 0007: throwaway, `glovebox-test` and production tiers; one compose file and `scripts/env.py`; test port 8765; `GLOVEBOX_TEST_URL` and `GLOVEBOX_TEST_TOKEN`; fictional fixture cast; a deterministic stand-in for every outside service including local inference.
 - The test environment runs on the 790, under the dedicated `glovebox-test` Linux identity and OpenClaw node.
-- Open decision carried from the ADR: the production host, needed before the production installation.
+- The production host is `zotac1070` (ADR 0007); the operator installs it, never a ticket or an agent.
 
 ## Testing Decisions
 
@@ -271,7 +271,7 @@ Do not weaken this contract silently and do not claim more than it, in code, doc
 
 ### Open decisions
 
-- The production host (ADR 0007). The test host is settled: the 790.
+- None. The test host is the 790 and the production host is `zotac1070` (ADR 0007).
 
 ### Interpretations made while writing this spec
 
