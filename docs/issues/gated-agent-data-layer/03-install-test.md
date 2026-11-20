@@ -17,4 +17,4 @@ The test host is settled: the operator decided on 2026-11-15 that `glovebox-test
 - [ ] Operator-run: on node `glovebox-test`, dev runs `scripts/env.py install-timer`; the operator confirms that `glovebox-test-env.timer` is active and that a later `main` commit arrives on the test environment within 5 minutes without anyone touching it.
 - [ ] Operator-run: the operator puts `GLOVEBOX_TEST_URL` (port 8765 on the 790) and `GLOVEBOX_TEST_TOKEN` into the node profile. The token was generated on the test node and is not committed anywhere.
 - [ ] Operator-run: the operator confirms that the test environment holds only the fictional fixture cast and stand-ins, and no production credential or data.
-- [ ] Operator-run: from a factory node, `scripts/env.py check` against `GLOVEBOX_TEST_URL` with `GLOVEBOX_TEST_TOKEN` passes.
+- [ ] Operator-run: from a factory node, `scripts/env.py check` against `GLOVEBOX_TEST_URL` with `GLOVEBOX_TEST_TOKEN` passes. This needs a gate change that 02 does not make: the test gate is published on loopback only and refuses any `Host` header other than loopback (`docs/environments.md`).

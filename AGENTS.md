@@ -19,6 +19,10 @@ The service listens on `127.0.0.1:8765`, MCP endpoint `/mcp`; override with `GLO
 
 Dependencies are pinned exactly in `pyproject.toml`; `constraints.txt` pins the full set. When you change a dependency, update both.
 
+## Environments
+
+Bring up a throwaway stack for your ticket with `python3 scripts/env.py up`, then `check`, `reset` and `down`. It runs the gate in rootless Docker with a stand-in for every outside service and a seeded fictional fixture cast. Never put real data in a fixture. Tiers, the test environment and the production runbook are in `docs/environments.md`. Tickets and agents never touch production.
+
 ## Read first
 
 - `CONTEXT.md`: the project's vocabulary. Use its terms.

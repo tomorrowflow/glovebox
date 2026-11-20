@@ -16,7 +16,7 @@ Glovebox has a hosted runtime (the gate service and its SQLite database), so it 
 
 **Shared tooling.** Throwaway and test share one compose file and one executable Python `scripts/env.py` with `up`, `check`, `reset`, `down`, `ensure-test` and `install-timer`. `up` creates the gitignored env file with the test token when it is missing. `install-timer` installs and starts the user timer `glovebox-test-env.timer`.
 
-**Test endpoint.** Port **8765**. Nodes read `GLOVEBOX_TEST_URL` and `GLOVEBOX_TEST_TOKEN`.
+**Test endpoint.** Port **8765**. Nodes read `GLOVEBOX_TEST_URL` and `GLOVEBOX_TEST_TOKEN`. While the gate has no authentication it is published on loopback of the test host only; reaching it from other hosts needs a later change to the gate (`docs/environments.md`).
 
 **Test data.** A fictional fixture cast that `reset` seeds. Never real, pseudonymised or production-copied data.
 

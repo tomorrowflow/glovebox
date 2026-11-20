@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the Glovebox test environment every 5 minutes
+
+[Timer]
+OnActiveSec=30s
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

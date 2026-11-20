@@ -1,0 +1,87 @@
+# Throwaway and test stacks (ADR 0007). Run it through scripts/env.py, which sets
+# the project name and adds compose.test.yaml on the test tier.
+#
+# This file is the throwaway shape: the gate is published on a free loopback
+# port. Where the test tier differs is in compose.test.yaml.
+
+name: glovebox
+
+x-standin: &standin
+  image: python:3.12-slim
+  user: "65534:65534"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  volumes:
+    - ./deploy/standins:/app:ro
+    - state:/state
+
+services:
+  gate:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gate
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      GLOVEBOX_HOST: 0.0.0.0
+      GLOVEBOX_PORT: "8765"
+      GLOVEBOX_TEST_TOKEN: ${GLOVEBOX_TEST_TOKEN:?run scripts/env.py up to create the env file}
+      # A host's Docker client may inject proxy variables into containers; the
+      # stand-ins must be reached directly.
+      NO_PROXY: standins,localhost,127.0.0.1
+      no_proxy: standins,localhost,127.0.0.1
+      # Where the stand-ins answer for each outside service. No gate feature reads
+      # these yet; the source tickets do.
+      GLOVEBOX_STANDIN_MAILBOX_MAIL: http://standins:9101
+      GLOVEBOX_STANDIN_MAILBOX_CALENDAR: http://standins:9102
+      GLOVEBOX_STANDIN_O365_MAIL: http://standins:9103
+      GLOVEBOX_STANDIN_O365_CALENDAR: http://standins:9104
+      GLOVEBOX_STANDIN_SIGNAL: http://standins:9105
+      GLOVEBOX_STANDIN_IMESSAGE: http://standins:9106
+      GLOVEBOX_STANDIN_WHATSAPP: http://standins:9107
+      GLOVEBOX_STANDIN_INFERENCE_LOCAL: http://standins:9108
+      GLOVEBOX_STANDIN_INFERENCE_EXTERNAL: http://standins:9109
+    ports:
+      - "127.0.0.1::8765"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 8765), timeout=2).close()"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    depends_on:
+      standins:
+        condition: service_healthy
+
+  standins:
+    <<: *standin
+    command: ["python", "/app/standins.py"]
+    healthcheck:
+      # Healthy only once the fixture cast is seeded: every listener answers 503 before.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as r; [r.urlopen(f'http://127.0.0.1:{p}/healthz', timeout=2) for p in range(9101, 9110)]"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  seed:
+    <<: *standin
+    # Runs as root in the container (the factory user in rootless Docker) to own the state volume.
+    user: "0:0"
+    command: ["python", "/app/seed.py"]
+    volumes:
+      - ./deploy/standins:/app:ro
+      - ./fixtures:/fixtures:ro
+      - state:/state
+    profiles: [tools]
+
+volumes:
+  state:
