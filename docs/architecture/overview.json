@@ -1,0 +1,18 @@
+{
+  "type": "high-level",
+  "title": "Glovebox at a glance",
+  "subtitle": "What the code does today: one MCP service an agent can connect to, with no tools and no data sources yet",
+  "motion": "reveal",
+  "nodes": [
+    {"id": "agent", "label": "AI agent", "sub": "MCP client", "kind": "optional", "row": 0, "col": 0},
+    {"id": "glovebox", "label": "Glovebox", "sub": "MCP service, empty tool list", "focal": true, "row": 0, "col": 1}
+  ],
+  "edges": [
+    {"from": "agent", "to": "glovebox", "label": "connects over HTTP", "kind": "primary"}
+  ],
+  "evidence": [
+    {"id": "agent", "file": "tests/test_tool_list.py", "line": 15, "note": "Only an MCP client in the acceptance test connects today; no real agent integration is in the code, so this node is inferred."},
+    {"id": "glovebox", "file": "src/glovebox/server.py", "line": 11, "note": "MCPServer named glovebox; no tool is registered, so the tool list is empty."},
+    {"id": "agent>glovebox", "file": "tests/conftest.py", "line": 49, "note": "The client reaches the service at /mcp over Streamable HTTP."}
+  ]
+}

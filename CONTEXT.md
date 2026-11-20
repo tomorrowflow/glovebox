@@ -2,6 +2,8 @@
 
 A gated data layer for self-hosted AI agents. It serves mail, calendar and messenger data to agents as permitted fields only, so text an attacker wrote never reaches the agent's model.
 
+Architecture map: docs/architecture/*.json (SeeCode specs, evidence-linked; rules in docs/architecture/README.md).
+
 ## Language
 
 ### Boundary
