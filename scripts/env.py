@@ -69,10 +69,10 @@ STANDIN_VARS = {
     "GLOVEBOX_STANDIN_INFERENCE_EXTERNAL": 9109,
 }
 MIN_PYTHON = (3, 12)  # requires-python in pyproject.toml
-NATIVE_SERVICES = ("gate", "standins")
 NATIVE_WAIT_SECONDS = 90
 STOP_GRACE_SECONDS = 10
 SERVE_POLL_SECONDS = 1.0
+RESTART_DELAY_SECONDS = 5.0  # before `serve` restarts a service that exited on its own
 
 # The system LaunchDaemons of the native test tier, in deploy/launchd/. Each file's
 # Label is its name without `.plist`.
@@ -282,10 +282,18 @@ def pid_file(service: str) -> Path:
 
 def pid_alive(path: Path) -> bool:
     try:
-        os.kill(int(path.read_text()), 0)
-    except (OSError, ValueError):  # no file, no such process, or not a pid
+        os.kill(int(path.read_text().split()[0]), 0)
+    except (OSError, ValueError, IndexError):  # no file, no such process, or not a pid
         return False
     return True
+
+
+def running_release(service: str) -> str:
+    """The desired line the service's live process was started for, else empty."""
+    path = pid_file(service)
+    if not pid_alive(path):
+        return ""
+    return path.read_text().partition(" ")[2].strip()
 
 
 def probe_health(port: int) -> str:
@@ -328,11 +336,16 @@ def native_up() -> int:
         return 1
     if not install_dependencies() or not native_seed():
         return 1
-    write_desired(f"up {release_fingerprint()}")
+    wanted = f"up {release_fingerprint()}"
+    write_desired(wanted)
     deadline = time.monotonic() + NATIVE_WAIT_SECONDS
-    while native_status() != ("ok", "ok"):
+    # Healthy is not enough: an old release answering is not the one just asked for.
+    while any(running_release(service) != wanted for service in STACK_SERVICES) or (
+        native_status() != ("ok", "ok")
+    ):
         if time.monotonic() > deadline:
-            print("start: failed")
+            alive = any(pid_alive(pid_file(service)) for service in STACK_SERVICES)
+            print("start: failed" if alive else "start: failed, no serve process is running")
             return 1
         time.sleep(1)
     return 0
@@ -341,7 +354,7 @@ def native_up() -> int:
 def native_down() -> int:
     write_desired("down")
     deadline = time.monotonic() + STOP_GRACE_SECONDS * 3
-    while any(pid_alive(pid_file(service)) for service in NATIVE_SERVICES):
+    while any(pid_alive(pid_file(service)) for service in STACK_SERVICES):
         if time.monotonic() > deadline:
             print("stop: failed")
             return 1
@@ -382,7 +395,9 @@ def serve(service: str, argv: list[str], poll: float = SERVE_POLL_SECONDS) -> in
     loaded = SCRIPT.stat().st_mtime_ns
     process: subprocess.Popen[bytes] | None = None
     running_for = ""
+    retry_after = 0.0
     pid = pid_file(service)
+    pid.unlink(missing_ok=True)  # a leftover of a serve that was killed
 
     def stop() -> None:
         nonlocal process
@@ -396,19 +411,26 @@ def serve(service: str, argv: list[str], poll: float = SERVE_POLL_SECONDS) -> in
         if process is not None and process.poll() is not None:
             print(f"serve: {service} exited with code {process.returncode}", flush=True)
             stop()
+            retry_after = time.monotonic() + RESTART_DELAY_SECONDS  # no hot restart loop
         elif process is not None and wanted != running_for:
             stop()
-        if process is None and wanted.startswith("up") and venv_python().exists():
+        wants_to_run = wanted.split()[:1] == ["up"] and venv_python().exists()
+        if process is None and wants_to_run and time.monotonic() >= retry_after:
             command, env = service_plan(service)
             try:
                 process = subprocess.Popen(command, cwd=REPO, env=env)
             except OSError:
                 print(f"serve: {service} did not start", flush=True)
+                retry_after = time.monotonic() + RESTART_DELAY_SECONDS
             else:
                 running_for = wanted
                 RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-                pid.write_text(f"{process.pid}\n")
-        if SCRIPT.stat().st_mtime_ns != loaded:
+                pid.write_text(f"{process.pid} {wanted}\n")
+        try:
+            changed = SCRIPT.stat().st_mtime_ns != loaded
+        except OSError:  # git checkout is replacing the file; look again next time
+            changed = False
+        if changed:
             stop()
             reexec(argv)
         time.sleep(poll)
@@ -660,6 +682,10 @@ def install_launchd_jobs(args: argparse.Namespace) -> int:
     if args.enable:
         print("install-timer: launchd jobs are installed by root; use --no-enable --unit-dir DIR")
         return 2
+    if args.python == sys.executable and sys.version_info < MIN_PYTHON:
+        # launchd would run the daemons on an interpreter that cannot run env.py.
+        print("install-timer: python 3.12 or newer is required; pass --python")
+        return 1
     home = user_home(args.user)
     logs = home / "Library" / "Logs" / "glovebox-test"
     try:
@@ -728,7 +754,7 @@ def build_parser() -> argparse.ArgumentParser:
     add("down", command_down, "remove the stack and its volumes")
     add("ensure-test", command_ensure_test, "bring the test stack to the current origin/main")
     serve_parser = add("serve", command_serve, "run one native service in the foreground (launchd)")
-    serve_parser.add_argument("service", choices=NATIVE_SERVICES)
+    serve_parser.add_argument("service", choices=STACK_SERVICES)
     timer = add("install-timer", command_install_timer, f"install and start {TIMER}")
     timer.add_argument(
         "--unit-dir",

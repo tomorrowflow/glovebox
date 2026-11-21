@@ -157,6 +157,26 @@ def test_installing_the_plists_twice_gives_the_same_files(env: ModuleType, tmp_p
     assert [name for name, _ in first] == sorted(TEST_PLISTS)
 
 
+def test_install_timer_will_not_bake_in_a_python_that_is_too_old(
+    env: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(env.sys, "version_info", (3, 9, 6, "final", 0))
+
+    code = env.main(["install-timer", "--no-enable", "--unit-dir", str(tmp_path / "units")])
+
+    assert code == 1
+    assert not (tmp_path / "units").exists()
+    assert "python 3.12 or newer" in capsys.readouterr().out
+
+    # An explicit --python is the operator's word for another interpreter.
+    setattr(env, "user_home", lambda user: tmp_path)  # noqa: B010 - env is a loaded module
+    args = ["install-timer", "--no-enable", "--unit-dir", str(tmp_path / "units")]
+    assert env.main([*args, "--python", "/opt/homebrew/bin/python3"]) == 0
+
+
 def test_install_timer_on_macos_will_not_enable_anything(
     env: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -251,6 +271,13 @@ def test_the_standin_variables_match_compose_yaml() -> None:
     }
 
     assert declared == env.STANDIN_VARS
+
+
+def test_the_standin_ports_match_the_listeners() -> None:
+    env = load_env_module()
+    standins = load_module("glovebox_standins_ports", STANDINS)
+
+    assert sorted(env.STANDIN_VARS.values()) == sorted(standins.SERVICES.values())
 
 
 def test_the_standins_bind_the_host_they_are_told_to(
@@ -358,6 +385,7 @@ def test_up_installs_seeds_and_asks_for_the_release_it_ran(
     monkeypatch.setattr(env, "native_seed", seed)
     monkeypatch.setattr(env, "native_status", lambda: ("ok", "ok"))
     monkeypatch.setattr(env, "release_fingerprint", lambda: "abc-123")
+    monkeypatch.setattr(env, "running_release", lambda service: "up abc-123")
 
     assert env.main(["up"]) == 0
 
@@ -373,6 +401,23 @@ def test_up_reports_a_start_that_never_became_healthy(
     monkeypatch.setattr(env, "install_dependencies", lambda: True)
     monkeypatch.setattr(env, "native_seed", lambda: True)
     monkeypatch.setattr(env, "native_status", lambda: ("unreachable", "missing"))
+    monkeypatch.setattr(env, "NATIVE_WAIT_SECONDS", 0)
+
+    assert env.main(["up"]) == 1
+
+    last = capsys.readouterr().out.splitlines()[-1]
+    assert last == "start: failed, no serve process is running"
+
+
+def test_up_does_not_accept_the_previous_release_answering_healthy(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(env, "install_dependencies", lambda: True)
+    monkeypatch.setattr(env, "native_seed", lambda: True)
+    monkeypatch.setattr(env, "native_status", lambda: ("ok", "ok"))
+    monkeypatch.setattr(env, "release_fingerprint", lambda: "new")
+    monkeypatch.setattr(env, "running_release", lambda service: "up old")
+    monkeypatch.setattr(env, "pid_alive", lambda path: True)
     monkeypatch.setattr(env, "NATIVE_WAIT_SECONDS", 0)
 
     assert env.main(["up"]) == 1
@@ -478,6 +523,7 @@ def test_the_native_backend_never_runs_launchctl_or_sudo(
     recorder = Recorder()
     monkeypatch.setattr(env.subprocess, "run", recorder)
     monkeypatch.setattr(env, "native_status", lambda: ("ok", "ok"))
+    monkeypatch.setattr(env, "running_release", lambda service: env.read_desired())
     (tmp_path / "venv" / "bin").mkdir(parents=True)
     (tmp_path / "venv" / "bin" / "python").touch()
     (tmp_path / "venv" / ".glovebox-install").write_text(env.dependency_digest())
@@ -576,6 +622,7 @@ def serving(
     python.parent.mkdir(parents=True)
     python.touch()
     monkeypatch.setattr(env, "service_plan", lambda service: (SLEEPER, {}))
+    monkeypatch.setattr(env, "RESTART_DELAY_SECONDS", 0)
     handlers = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGINT)}
     yield env
     for number, handler in handlers.items():
@@ -607,7 +654,7 @@ def wait_for(condition: Any, seconds: float = 10) -> None:
 
 
 def running_pid(env: ModuleType) -> int:
-    return int(env.pid_file("gate").read_text())
+    return int(env.pid_file("gate").read_text().split()[0])
 
 
 def test_serve_runs_the_service_while_up_is_wanted_and_stops_it_on_down(
@@ -670,6 +717,62 @@ def test_serve_restarts_a_service_that_died(serving: ModuleType) -> None:
     run_serve(env, script)
 
     assert pids[0] != pids[1]
+
+
+def test_serve_waits_before_restarting_a_service_that_keeps_dying(
+    serving: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = serving
+    monkeypatch.setattr(env, "RESTART_DELAY_SECONDS", 30)
+    starts: list[int] = []
+
+    def script() -> None:
+        env.write_desired("up one")
+        wait_for(lambda: env.pid_file("gate").exists())
+        starts.append(running_pid(env))
+        os.kill(starts[0], signal.SIGKILL)
+        time.sleep(0.5)  # many polls
+        assert not env.pid_file("gate").exists()
+
+    run_serve(env, script)
+
+
+def test_serve_records_the_release_each_process_runs_and_clears_a_stale_pid_file(
+    serving: ModuleType, tmp_path: Path
+) -> None:
+    env = serving
+    (tmp_path / "run").mkdir()
+    env.pid_file("gate").write_text("1 up leftover\n")
+    seen: dict[str, str] = {}
+
+    def script() -> None:
+        wait_for(lambda: not env.pid_file("gate").exists())  # serve drops the leftover
+        env.write_desired("up one")
+        wait_for(lambda: env.running_release("gate") == "up one")
+        seen["release"] = env.running_release("gate")
+
+    run_serve(env, script)
+
+    assert seen == {"release": "up one"}
+    assert env.running_release("gate") == ""
+
+
+def test_serve_survives_env_py_vanishing_for_a_moment(
+    serving: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = serving
+    script_file = tmp_path / "env.py"
+    script_file.write_text("# during a git checkout")
+    monkeypatch.setattr(env, "SCRIPT", script_file)
+
+    def script() -> None:
+        env.write_desired("up one")
+        wait_for(lambda: env.pid_file("gate").exists())
+        script_file.unlink()
+        time.sleep(0.3)
+        assert env.pid_file("gate").exists()  # still running, not crashed
+
+    assert run_serve(env, script) == 0
 
 
 def test_serve_stops_the_service_when_launchd_stops_it(serving: ModuleType) -> None:
