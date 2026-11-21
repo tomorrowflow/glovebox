@@ -4,9 +4,9 @@ A real MCP client calls the item, count and group tools of a running gate whose 
 source is an HTTP fixture that a test can break and mend. Every fault is hostile: the
 status line, headers and body the source answers with are full of corpus strings, and
 the assertion is that none of them reaches a result or the gate's log. One fault at a
-time is injected; simultaneous faults are out of scope. Two tests reach below the seam
+time is injected; simultaneous faults are out of scope. Three tests reach below the seam
 on purpose, each marked: a tampered sync row (the only way to make the gate hold an
-invalid response) and a file the gate may not read.
+invalid response), a file the gate may not read, and a database from before sync counts.
 """
 
 import json
@@ -76,8 +76,8 @@ def broken_source(fixture: dict[str, object]) -> Iterator[Source]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             source.requests.append(self.path)
+            fault = source.fault  # as of when the request arrived, not when it is answered
             time.sleep(source.delay)
-            fault = source.fault
             try:
                 if fault is None:
                     _respond(self, 200, "OK", json.dumps(source.fixture).encode())
@@ -376,28 +376,41 @@ async def test_a_sync_status_that_fails_validation_is_replaced_by_the_fixed_erro
 
 
 @pytest.mark.anyio
-async def test_a_cancelled_call_leaves_the_sync_state_intact(start_gate: GateStarter) -> None:
+async def test_a_cancelled_sync_still_completes_and_leaves_the_gate_usable(
+    start_gate: GateStarter,
+) -> None:
     with broken_source(small_fixture()) as source, start_gate(mail_url=source.url) as gate:
-        async with agent_client(gate) as client:
-            before = await call(client, LIST_TOOL)
-
+        # The very first sync is slow and its caller gives up half way.
         source.delay = 0.8
         async with agent_client(gate) as client:
             with anyio.move_on_after(0.2) as scope:
                 await client.call_tool(LIST_TOOL)
             assert scope.cancelled_caught
 
+        # The sync finished anyway: the account is known, so an outage now names it.
         source.delay = 0
+        source.fault = "unavailable"
+        async with agent_client(gate) as client:
+            down = await call(client, COUNT_TOOL)
+            synced = account_of(down)
+            assert synced["status"] == "stale"
+            assert synced["last_sync"] == "2026-01-10T12:00Z"
+
+        # A caller that gives up on a failing sync leaves the lock free and the state sound.
+        source.delay = 0.8
+        async with agent_client(gate) as client:
+            with anyio.move_on_after(0.2) as scope:
+                await client.call_tool(LIST_TOOL)
+            assert scope.cancelled_caught
+        source.delay = 0
+        source.fault = None
         async with agent_client(gate) as client:
             after = await call(client, LIST_TOOL)
-            source.fault = "unavailable"
-            down = await call(client, COUNT_TOOL)
 
-    assert after == before
-    assert account_of(down) == {**account_of(before), "status": "stale"}
-    log = gate.log.read_text(errors="replace")
-    assert "Traceback" not in log
-    assert_clean(gate, before, after, down)
+    assert account_of(after) == {**synced, "status": "current"}
+    assert len(after["items"]) == 3
+    assert "Traceback" not in gate.log.read_text(errors="replace")
+    assert_clean(gate, down, after)
 
 
 @pytest.mark.anyio

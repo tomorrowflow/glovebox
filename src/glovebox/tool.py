@@ -181,7 +181,6 @@ class ReadTool:
             return error_result("source_unavailable", spec.output)
 
         with self._sync:
-            now = self._clock()
             try:
                 mailbox = self._source.fetch()
             except SourceError as failure:
@@ -190,6 +189,7 @@ class ReadTool:
                 accounts = self._store.mark_unsynced(self._source.identity, status)
                 logger.warning("source sync failed: %s", status)
                 return error_result("source_unavailable", spec.output, accounts)
+            now = self._clock()
             account = self._store.replace_mailbox(
                 self._source.kind, self._source.identity, mailbox, now
             )
