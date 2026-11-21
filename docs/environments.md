@@ -45,7 +45,7 @@ Environment knobs: `GLOVEBOX_ENV_TIER` (`throwaway` or `test`) overrides the det
 
 ## The stack
 
-On Docker, `compose.yaml` holds three services; `compose.test.yaml` is the override where the Linux test tier differs (fixed port 8765, `restart: unless-stopped`). Natively the same three parts run without containers. Both publish the gate on loopback only, because it has no authentication yet.
+On Docker, `compose.yaml` holds three services; `compose.test.yaml` is the override where the Linux test tier differs (fixed port 8765, `restart: unless-stopped`). Natively the same three parts run without containers. Both publish the gate on loopback only (see the allowed-hosts note below).
 
 - `gate`: the Glovebox service. Docker: built from `deploy/Dockerfile.gate`, listening on 8765 in the container; throwaway publishes it on a free loopback port and `check` finds it with `docker compose port`. Native: `.venv/bin/glovebox` on `127.0.0.1:8765`.
 - `standins`: the stand-ins, one listener per outside service (`deploy/standins/standins.py`). Natively they bind `127.0.0.1` (`STANDINS_HOST`) on the same ports.
@@ -53,7 +53,7 @@ On Docker, `compose.yaml` holds three services; `compose.test.yaml` is the overr
 
 Native state lives under the checkout, owned by the tier's user and gitignored: `.venv/` (the virtualenv), `.run/` (the seeded state, the `desired` file that `up` and `down` write and `serve` reads, and one pid file per service that also names the release it runs) and `.env`. Logs go to `~/Library/Logs/glovebox-test/`; launchd does not rotate them, so the operator trims them.
 
-The gate has no authentication yet (agent tokens come with ticket 07), so `GLOVEBOX_TEST_TOKEN`, the test environment's stand-in for an agent token, is generated, passed to the gate and sent by `check`, but not yet enforced. For that reason the test tier listens on 8765 on loopback of the Mac mini only, and `scripts/env.py` has no way to widen it. Nodes on other hosts cannot reach `GLOVEBOX_TEST_URL` yet. Two gate-side changes come first, and this ticket makes neither: a setting for the address the gate is published on, and an allowed-hosts setting, because the gate's MCP transport answers `421 Misdirected Request` to any `Host` header other than `localhost`, `127.0.0.1` or `[::1]` (DNS-rebinding protection). They need their own ticket, before ticket 03's last item can pass.
+The gate enforces one static bearer token from configuration, `GLOVEBOX_AGENT_TOKEN`; operator-issued agent tokens replace it with ticket 07. The stacks set it to `GLOVEBOX_TEST_TOKEN`, the test environment's token, which `check` sends. A request without it gets `401` before any MCP handler runs. The gate keeps its SQLite database (permitted fields, handle mappings, sync state; no raw text) at `GLOVEBOX_DB`: the `gate-data` volume on Docker, `.run/state/glovebox.db` natively, so `down` removes it on both, and handles survive a restart but not a `down`. The test tier listens on 8765 on loopback of the Mac mini only, and `scripts/env.py` has no way to widen it. Nodes on other hosts cannot reach `GLOVEBOX_TEST_URL` yet. Two gate-side changes come first, and neither is made yet: a setting for the address the gate is published on, and an allowed-hosts setting, because the gate's MCP transport answers `421 Misdirected Request` to any `Host` header other than `localhost`, `127.0.0.1` or `[::1]` (DNS-rebinding protection). They need their own ticket, before ticket 03's last item can pass.
 
 ### Environment names
 
@@ -70,7 +70,7 @@ Throwaway and test hold only the **fictional fixture cast** in `fixtures/cast.js
 
 ## Stand-ins
 
-Every outside service has a deterministic stand-in; no vendor sandbox account is used. The stand-ins speak plain HTTP and JSON from the seeded state, not the vendor protocols, and each answers `GET /healthz` (503 until seeded) and `GET /` with its fixture. They are for testing only and never count as delivering a source (ADR 0003). The gate reaches them through `GLOVEBOX_STANDIN_*` variables, at the addresses below; no gate feature reads them yet, the source tickets do.
+Every outside service has a deterministic stand-in; no vendor sandbox account is used. The stand-ins speak plain HTTP and JSON from the seeded state, not the vendor protocols, and each answers `GET /healthz` (503 until seeded) and `GET /` with its fixture. They are for testing only and never count as delivering a source (ADR 0003). The gate reaches them through `GLOVEBOX_STANDIN_*` variables, at the addresses below. It reads only `GLOVEBOX_STANDIN_MAILBOX_MAIL` so far, as its fixture mail source (source kind `fixture_mail`); the source tickets read the rest. `GLOVEBOX_MAIL_FIXTURE`, a path to a document of the same shape, replaces it for tests and local runs; setting both is a configuration error.
 
 | Outside service | Stand-in | Address in the Docker stack (native: `127.0.0.1:<port>`) | Variable |
 |-----------------|----------|----------------------|----------|
@@ -140,7 +140,7 @@ The production host is the Mac mini, the same machine as test and a different us
    Confirm that nothing is left: `launchctl print gui/$(id -u)/glovebox.prod.gate` must fail with "Could not find service", and nothing may be listening on the production port (`lsof -nP -iTCP:<port> -sTCP:LISTEN`).
 3. Clone the repository to `~/glovebox` if it is not there, and check out exactly that commit: `git -C ~/glovebox fetch origin && git -C ~/glovebox checkout --detach <commit>`.
 4. Build the virtualenv at that commit with Homebrew Python 3.12 or newer, with the pinned dependencies: `cd ~/glovebox && /opt/homebrew/bin/python3 -m venv .venv && .venv/bin/pip install -c constraints.txt -e .`. Production does not use `scripts/env.py`, `compose.yaml`, the stand-ins or the fixtures, and it does not use `.env` of test.
-5. Provide the production configuration and secrets from the operator's own store, in files only `frogger` can read: `install -d -m 700 ~/.config/glovebox` and then `~/.config/glovebox/gate.env` with `chmod 600`, as `KEY=VALUE` lines. Do not copy anything from test. Never put a secret in the plist, in the checkout or in a log.
+5. Provide the production configuration and secrets from the operator's own store, in files only `frogger` can read: `install -d -m 700 ~/.config/glovebox` and then `~/.config/glovebox/gate.env` with `chmod 600`, as `KEY=VALUE` lines. The gate refuses to start without `GLOVEBOX_AGENT_TOKEN`, the one static agent token it enforces until ticket 07 (at least 16 printable characters, no whitespace; choose it yourself and keep it out of every ticket and agent). Set `GLOVEBOX_DB=$HOME/.local/share/glovebox/gate.db` too, so the database, and with it every handle, sits outside the checkout and survives redeploys; without it the gate writes `glovebox.db` into the checkout. Production has no mail source configured yet, so the read tool answers its fixed `source_unavailable` error there. Do not copy anything from test. Never put a secret in the plist, in the checkout or in a log.
 6. Install the launchd plist as a LaunchAgent. `deploy/launchd/glovebox.prod.gate.plist` is a template. A fresh account has neither `~/Library/LaunchAgents` nor the log directory, and launchd creates neither, so make both, then fill in the template, then lint the result:
 
    ```sh
@@ -157,4 +157,4 @@ The production host is the Mac mini, the same machine as test and a different us
 8. Verify: `python3 scripts/env.py check --url <production MCP URL>`, with the production agent token in the variable named by `--token-env`. It must exit 0. Because step 2 stopped the old gate and was confirmed, a pass is the new release answering.
 9. If `check` fails, stop the deployment by repeating step 2, restore the previous commit, rebuild the virtualenv (step 4) and bootstrap again (step 6), and investigate on throwaway or test.
 
-Out of scope here: the iMessage source itself, the gate's authentication, and the publish-address and allowed-hosts settings (a separate ticket).
+Out of scope here: the iMessage source itself, operator-issued agent tokens (ticket 07), and the publish-address and allowed-hosts settings (a separate ticket).

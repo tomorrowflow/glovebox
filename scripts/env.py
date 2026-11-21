@@ -216,13 +216,18 @@ def venv_python() -> Path:
 def service_plan(service: str) -> tuple[list[str], dict[str, str]]:
     """The command and environment that run one native service.
 
-    Everything binds loopback only, like the Docker test tier (the gate has no
-    authentication yet). The stand-ins are reached by their loopback ports.
+    Everything binds loopback only, like the Docker test tier (the gate's allowed
+    hosts are loopback only). The stand-ins are reached by their loopback ports. The
+    gate enforces the test token as its one agent token and keeps its database next
+    to the seeded state, so `down` removes both.
     """
     env = {**os.environ, **read_env_file()}
     if service == "gate":
         env["GLOVEBOX_HOST"] = "127.0.0.1"
         env["GLOVEBOX_PORT"] = str(native_gate_port())
+        env["GLOVEBOX_DB"] = str(SEED_STATE.parent / "glovebox.db")
+        if TOKEN_VAR in env:
+            env["GLOVEBOX_AGENT_TOKEN"] = env[TOKEN_VAR]
         for name, port in STANDIN_VARS.items():
             env[name] = f"http://127.0.0.1:{port}"
         return [str(VENV / "bin" / "glovebox")], env

@@ -15,7 +15,7 @@ Python 3.12 or newer. Run from the repository root.
 | Type check | `.venv/bin/python -m mypy` |
 | Run the service | `.venv/bin/glovebox` |
 
-The service listens on `127.0.0.1:8765`, MCP endpoint `/mcp`; override with `GLOVEBOX_HOST` and `GLOVEBOX_PORT`. The scaffold has no authentication yet (agent tokens come later), so keep it on loopback. CI (`.github/workflows/ci.yml`) runs the install, lint, type check and test commands above.
+The service listens on `127.0.0.1:8765`, MCP endpoint `/mcp`; override with `GLOVEBOX_HOST` and `GLOVEBOX_PORT`. It refuses to start without `GLOVEBOX_AGENT_TOKEN` (one static bearer token, at least 16 printable characters; operator-issued agent tokens come later) and enforces it on every request, so keep it on loopback. `GLOVEBOX_DB` is the SQLite file (default `glovebox.db`); the fixture mail source is `GLOVEBOX_STANDIN_MAILBOX_MAIL` (a stand-in URL) or `GLOVEBOX_MAIL_FIXTURE` (a file). CI (`.github/workflows/ci.yml`) runs the install, lint, type check and test commands above.
 
 Dependencies are pinned exactly in `pyproject.toml`; `constraints.txt` pins the full set. When you change a dependency, update both.
 
@@ -34,3 +34,5 @@ Architecture map: docs/architecture/*.json (SeeCode specs, evidence-linked; rule
 ## Testing
 
 Acceptance tests drive the service through MCP tool calls with a real MCP client over HTTP (ADR 0006). Tests live in `tests/`.
+
+Every new field or tool extends the reusable hostile-corpus helpers: put corpus strings in the new attacker-writable fields of `hostile_mail_fixture` (`tests/hostile.py`), add any new response channel to `observe_gate`, and check new output schemas with `closed_schema_problems` (`tests/schema.py`). `assert_no_corpus` then covers every channel. Responses leave the gate only through `output.release`, the one output validator.

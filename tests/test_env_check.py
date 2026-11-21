@@ -1,6 +1,7 @@
 """`scripts/env.py check` against a gate URL (ADR 0007)."""
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -18,9 +19,10 @@ ENV_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "env.py"
 UNHEALTHY = "gate: unhealthy\ncheck: unhealthy\n"
 
 
-def run_env(*args: str) -> subprocess.CompletedProcess[str]:
+def run_env(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(ENV_SCRIPT), *args],
+        env=env,
         capture_output=True,
         text=True,
         timeout=60,
@@ -81,7 +83,15 @@ def speaks_garbage() -> Iterator[str]:
 
 
 def test_check_passes_against_a_running_gate(gate: RunningGate) -> None:
-    assert_status(run_env("check", "--url", gate.url), 0, "gate: ok\ncheck: healthy\n")
+    env = {**os.environ, "GLOVEBOX_TEST_TOKEN": gate.token}
+
+    assert_status(run_env("check", "--url", gate.url, env=env), 0, "gate: ok\ncheck: healthy\n")
+
+
+def test_check_is_unhealthy_against_a_gate_that_refuses_its_token(gate: RunningGate) -> None:
+    env = {**os.environ, "GLOVEBOX_TEST_TOKEN": "not-the-gates-token-0123456789"}
+
+    assert_status(run_env("check", "--url", gate.url, env=env), 1, UNHEALTHY)
 
 
 def test_check_fails_when_the_gate_is_unreachable() -> None:

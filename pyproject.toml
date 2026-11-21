@@ -9,12 +9,16 @@ description = "A gated data layer for self-hosted AI agents."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "anyio==4.16.0",
     "mcp==2.3.0",
+    "pydantic==2.14.3",
+    "starlette==1.10.0",
     "uvicorn==0.54.0",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "httpx2==2.16.2",
     "mypy==2.4.1",
     "pytest==9.2.0",
     "ruff==0.17.5",

@@ -27,13 +27,15 @@ services:
     environment:
       GLOVEBOX_HOST: 0.0.0.0
       GLOVEBOX_PORT: "8765"
-      GLOVEBOX_TEST_TOKEN: ${GLOVEBOX_TEST_TOKEN:?run scripts/env.py up to create the env file}
+      # The one static agent token the gate enforces; the test token is its value.
+      GLOVEBOX_AGENT_TOKEN: ${GLOVEBOX_TEST_TOKEN:?run scripts/env.py up to create the env file}
+      GLOVEBOX_DB: /data/glovebox.db
       # A host's Docker client may inject proxy variables into containers; the
       # stand-ins must be reached directly.
       NO_PROXY: standins,localhost,127.0.0.1
       no_proxy: standins,localhost,127.0.0.1
-      # Where the stand-ins answer for each outside service. No gate feature reads
-      # these yet; the source tickets do.
+      # Where the stand-ins answer for each outside service. The gate reads only
+      # the mailbox.org mail one so far; the other source tickets read the rest.
       GLOVEBOX_STANDIN_MAILBOX_MAIL: http://standins:9101
       GLOVEBOX_STANDIN_MAILBOX_CALENDAR: http://standins:9102
       GLOVEBOX_STANDIN_O365_MAIL: http://standins:9103
@@ -43,6 +45,9 @@ services:
       GLOVEBOX_STANDIN_WHATSAPP: http://standins:9107
       GLOVEBOX_STANDIN_INFERENCE_LOCAL: http://standins:9108
       GLOVEBOX_STANDIN_INFERENCE_EXTERNAL: http://standins:9109
+    volumes:
+      # The gate's database: handles must survive a restart of the container.
+      - gate-data:/data
     ports:
       - "127.0.0.1::8765"
     healthcheck:
@@ -85,3 +90,4 @@ services:
 
 volumes:
   state:
+  gate-data:

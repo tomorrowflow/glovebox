@@ -288,6 +288,9 @@ def test_the_gate_runs_from_the_venv_on_loopback_with_the_token_and_standin_addr
     assert environment["GLOVEBOX_HOST"] == "127.0.0.1"
     assert environment["GLOVEBOX_PORT"] == "8765"
     assert environment["GLOVEBOX_TEST_TOKEN"] == "abc123"
+    assert environment["GLOVEBOX_AGENT_TOKEN"] == "abc123"
+    # Next to the seeded state, which `down` removes.
+    assert environment["GLOVEBOX_DB"] == str(tmp_path / "run" / "state" / "glovebox.db")
     assert environment["GLOVEBOX_STANDIN_IMESSAGE"] == "http://127.0.0.1:9106"
     assert environment["GLOVEBOX_STANDIN_INFERENCE_EXTERNAL"] == "http://127.0.0.1:9109"
 
