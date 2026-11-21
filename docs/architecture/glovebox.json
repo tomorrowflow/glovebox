@@ -33,15 +33,15 @@
     {"id": "tool", "file": "src/glovebox/tool.py", "line": 37},
     {"id": "main", "file": "src/glovebox/__main__.py", "line": 15, "note": "Reads GLOVEBOX_HOST and GLOVEBOX_PORT, builds the app from the environment."},
     {"id": "source", "file": "src/glovebox/sources.py", "line": 58, "note": "The only code that sees raw upstream structure; reads no text field."},
-    {"id": "store", "file": "src/glovebox/store.py", "line": 67, "note": "Permitted fields, keyed-digest handle mappings and sync state; no raw text."},
-    {"id": "validator", "file": "src/glovebox/output.py", "line": 90, "note": "Checks the whole result; a failure becomes the fixed response_invalid error."},
+    {"id": "store", "file": "src/glovebox/store.py", "line": 66, "note": "Permitted fields, keyed-digest handle mappings and sync state; no raw text."},
+    {"id": "validator", "file": "src/glovebox/output.py", "line": 93, "note": "Checks the whole result; a failure becomes the fixed response_invalid error."},
     {"id": "client>uvicorn", "file": "tests/client.py", "line": 22},
     {"id": "uvicorn>auth", "file": "src/glovebox/server.py", "line": 54, "note": "add_middleware makes the token check the outermost layer of the app."},
     {"id": "auth>mcp", "file": "src/glovebox/auth.py", "line": 22},
     {"id": "mcp>tool", "file": "src/glovebox/server.py", "line": 37},
     {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 62},
     {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 66},
-    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 51},
+    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 47},
     {"id": "main>uvicorn", "file": "src/glovebox/__main__.py", "line": 22}
   ]
 }

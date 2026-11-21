@@ -127,9 +127,16 @@ def parse_message(message: object) -> SourceItem | None:
         sender_key=sender_key,
         thread_key=thread if isinstance(thread, str) and thread else upstream_id,
         received=received,
-        read_status="unknown" if not isinstance(read, bool) else "read" if read else "unread",
+        read_status=read_status_of(read),
         has_attachments=isinstance(attachments, list) and len(attachments) > 0,
     )
+
+
+def read_status_of(read: object) -> ReadStatus:
+    """Only a real boolean names a status; anything else the source put there is unknown."""
+    if isinstance(read, bool):
+        return "read" if read else "unread"
+    return "unknown"
 
 
 def sender_key_of(sender: object) -> str | None:

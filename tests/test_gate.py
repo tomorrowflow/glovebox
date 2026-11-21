@@ -21,6 +21,7 @@ from pathlib import Path
 
 import httpx2
 import pytest
+from mcp import Client
 from mcp.shared.exceptions import MCPError
 
 from tests.client import READ_TOOL, agent_client
@@ -172,6 +173,13 @@ def test_requests_without_a_valid_token_are_rejected_before_any_tool_runs(
 async def test_a_client_with_the_wrong_token_cannot_connect(gate: RunningGate) -> None:
     with pytest.raises(Exception):  # noqa: B017 - the client's error type is not the contract
         async with agent_client(gate, token="wrong-token-0123456789abcdef") as client:
+            await client.list_tools()
+
+
+@pytest.mark.anyio
+async def test_a_client_that_sends_no_token_cannot_connect(gate: RunningGate) -> None:
+    with pytest.raises(Exception):  # noqa: B017 - the client's error type is not the contract
+        async with Client(gate.url) as client:
             await client.list_tools()
 
 

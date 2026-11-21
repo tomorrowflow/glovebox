@@ -44,11 +44,11 @@ class ReadTool:
         """Answer one tool call. Whatever happens, the response passes the validator."""
         try:
             response = await anyio.to_thread.run_sync(self._respond, name, arguments)
-        except Exception:
+            return release(response)
+        except Exception as error:
             # Only the type is logged: an exception message may hold upstream text.
-            logger.error("tool call failed")
-            response = error_result("internal_error")
-        return release(response)
+            logger.error("tool call failed: %s", type(error).__name__)
+            return release(error_result("internal_error"))
 
     def _respond(self, name: str, arguments: Mapping[str, Any] | None) -> types.CallToolResult:
         if name != TOOL_NAME:

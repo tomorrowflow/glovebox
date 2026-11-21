@@ -20,11 +20,16 @@ from pydantic import (
     ValidationError,
 )
 
+from glovebox.formats import (
+    HANDLE_LENGTH,
+    HANDLE_PATTERN,
+    MINUTE_FORMAT,
+    MINUTE_LENGTH,
+    MINUTE_PATTERN,
+)
 from glovebox.sources import ReadStatus, SourceKind
 
 MAX_ITEMS = 50
-HANDLE_LENGTH = 24
-MINUTE_FORMAT = "%Y-%m-%dT%H:%MZ"
 
 ErrorCode = Literal[
     "none",
@@ -43,13 +48,11 @@ def _is_a_minute(value: str) -> str:
 
 Handle = Annotated[
     str,
-    StringConstraints(
-        pattern=r"^[a-z2-7]{24}$", min_length=HANDLE_LENGTH, max_length=HANDLE_LENGTH
-    ),
+    StringConstraints(pattern=HANDLE_PATTERN, min_length=HANDLE_LENGTH, max_length=HANDLE_LENGTH),
 ]
 Minute = Annotated[
     str,
-    StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$", min_length=17, max_length=17),
+    StringConstraints(pattern=MINUTE_PATTERN, min_length=MINUTE_LENGTH, max_length=MINUTE_LENGTH),
     AfterValidator(_is_a_minute),
 ]
 

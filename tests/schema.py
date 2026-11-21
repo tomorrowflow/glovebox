@@ -7,8 +7,6 @@ source wrote can fit in it. Every later tool's output schema goes through
 
 from typing import Any
 
-ANCHORED = ("^", "$")
-
 
 def closed_schema_problems(schema: dict[str, Any]) -> list[str]:
     """What is open in `schema`: each problem as a path and a reason. Empty means closed."""
@@ -48,7 +46,7 @@ def _walk(root: dict[str, Any], node: Any, path: str, problems: list[str]) -> No
         if "maxItems" not in node:
             problems.append(f"{path}: array has no maxItems")
         _walk(root, node.get("items"), f"{path}/[]", problems)
-    elif kind in ("boolean",):
+    elif kind == "boolean":
         pass
     elif kind in ("integer", "number"):
         if "minimum" not in node or "maximum" not in node:
@@ -63,11 +61,7 @@ def _check_string(node: dict[str, Any], path: str, problems: list[str]) -> None:
     if "enum" in node or "const" in node:
         return
     pattern = node.get("pattern")
-    if not (
-        isinstance(pattern, str)
-        and pattern.startswith(ANCHORED[0])
-        and pattern.endswith(ANCHORED[1])
-    ):
+    if not (isinstance(pattern, str) and pattern.startswith("^") and pattern.endswith("$")):
         problems.append(f"{path}: string is neither an enum nor an anchored pattern")
     if "maxLength" not in node:
         problems.append(f"{path}: string has no maxLength")

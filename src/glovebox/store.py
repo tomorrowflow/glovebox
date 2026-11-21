@@ -18,10 +18,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from glovebox.formats import HANDLE_ALPHABET, HANDLE_LENGTH, MINUTE_FORMAT
 from glovebox.sources import SourceKind, SourceMailbox
 
-HANDLE_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
-HANDLE_LENGTH = 24
 BUSY_TIMEOUT_SECONDS = 30
 MINT_ATTEMPTS = 16
 
@@ -57,7 +56,7 @@ create table if not exists sync_state (
 
 
 def minute(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%MZ")
+    return moment.strftime(MINUTE_FORMAT)
 
 
 def new_handle() -> str:
