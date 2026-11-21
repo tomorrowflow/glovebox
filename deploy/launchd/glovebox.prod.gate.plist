@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Production gate template (ADR 0007), for the operator only. Fill in the
+  placeholders as docs/environments.md says, then install it as a LaunchAgent
+  of the user frogger: ~/Library/LaunchAgents/glovebox.prod.gate.plist.
+
+  It is an agent, not a daemon, because production reads iMessage: Messages must
+  be signed in under frogger, and that needs frogger's GUI login session. The
+  gate alone would run as a daemon with a UserName key, but a daemon cannot see
+  that session's Messages.
+
+  The secrets are not in this file. @SECRETS@ is a KEY=VALUE file, chmod 600,
+  that only frogger can read; the shell sources it and replaces itself with the
+  gate. No tool in this repository reads, writes or copies it.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>glovebox.prod.gate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . "$1"; set +a; exec "$2"</string>
+    <string>sh</string>
+    <string>@SECRETS@</string>
+    <string>@REPO@/.venv/bin/glovebox</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@REPO@</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/glovebox/gate.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/glovebox/gate.log</string>
+</dict>
+</plist>

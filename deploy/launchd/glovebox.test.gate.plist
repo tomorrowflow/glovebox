@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The test gate (ADR 0007), a system LaunchDaemon that runs as the hidden user
+  glovebox-test: that user has no login session, so a user agent cannot run.
+  `env.py install-timer` (with no-enable) fills in the placeholders; root copies the
+  result to /Library/LaunchDaemons once. After that env.py manages the stack
+  without root: this job only runs `env.py serve`, which keeps the gate process
+  alive while `env.py up` wants it. Needs no GUI login.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>glovebox.test.gate</string>
+  <key>UserName</key>
+  <string>@USER@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PYTHON@</string>
+    <string>@REPO@/scripts/env.py</string>
+    <string>serve</string>
+    <string>gate</string>
+    <string>--tier</string>
+    <string>test</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@REPO@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>GLOVEBOX_ENV_TIER</key>
+    <string>test</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>@LOGS@/gate.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOGS@/gate.log</string>
+</dict>
+</plist>

@@ -105,7 +105,8 @@ def run_env(*args: str, tier: str = "throwaway") -> subprocess.CompletedProcess[
         text=True,
         timeout=60,
         check=False,
-        env={**os.environ, "GLOVEBOX_ENV_TIER": tier},
+        # The Docker path, also on a Mac; the native one is tested in test_env_native.
+        env={**os.environ, "GLOVEBOX_ENV_TIER": tier, "GLOVEBOX_ENV_BACKEND": "docker"},
     )
 
 
