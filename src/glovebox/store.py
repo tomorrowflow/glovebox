@@ -24,10 +24,12 @@ from glovebox.formats import (
     HANDLE_ALPHABET,
     HANDLE_LENGTH,
     MINUTE_FORMAT,
+    SKIPPED_CAP,
+    SKIPPED_CAPPED,
     WINDOW_DAYS,
 )
 from glovebox.query import Filters, GroupBy, SortOrder
-from glovebox.sources import SourceKind, SourceMailbox
+from glovebox.sources import SourceKind, SourceMailbox, SyncStatus
 
 BUSY_TIMEOUT_SECONDS = 30
 MINT_ATTEMPTS = 16
@@ -75,7 +77,12 @@ create table if not exists sync_state (
     account_handle text primary key,
     source_kind text not null,
     status text not null,
-    last_sync text not null
+    last_sync text not null,
+    skipped integer not null default 0
+);
+create table if not exists sources (
+    source_digest text primary key,
+    account_handle text not null
 );
 """
 
@@ -96,6 +103,12 @@ class Store:
         os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
         with closing(sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)) as database:
             database.executescript(SCHEMA)
+            # A database from before sync counts: add the column the schema now has.
+            columns = {row[1] for row in database.execute("pragma table_info(sync_state)")}
+            if "skipped" not in columns:
+                database.execute(
+                    "alter table sync_state add column skipped integer not null default 0"
+                )
         with self._transaction() as database:
             for name in ("handle_key", "cursor_key"):
                 database.execute(
@@ -122,11 +135,15 @@ class Store:
         with closing(sqlite3.connect(self._path, timeout=BUSY_TIMEOUT_SECONDS)) as database:
             return _meta_key(database, "cursor_key")
 
-    def replace_mailbox(self, kind: SourceKind, mailbox: SourceMailbox, synced_at: datetime) -> str:
+    def replace_mailbox(
+        self, kind: SourceKind, source: str, mailbox: SourceMailbox, synced_at: datetime
+    ) -> str:
         """Make the account's stored items match one complete fetch, in one transaction.
 
         Mail outside the rolling window at `synced_at` is not ingested, and items of
-        any account that have left the window are dropped. Returns the account's handle.
+        any account that have left the window are dropped. The account is current, or
+        incomplete if the source held items that could not be understood. `source`
+        names the configured source that served it. Returns the account's handle.
         """
         window_start, window_end = window(synced_at)
         with self._transaction() as database:
@@ -150,11 +167,56 @@ class Store:
                         int(item.has_attachments),
                     ),
                 )
+            status: SyncStatus = "incomplete" if mailbox.skipped else "current"
             database.execute(
-                "insert or replace into sync_state values (?, ?, 'current', ?)",
-                (account, kind, minute(synced_at)),
+                "insert or replace into sync_state"
+                " (account_handle, source_kind, status, last_sync, skipped)"
+                " values (?, ?, ?, ?, ?)",
+                (account, kind, status, minute(synced_at), mailbox.skipped),
+            )
+            database.execute(
+                "insert or replace into sources values (?, ?)",
+                (_source_digest(key, source), account),
             )
         return account
+
+    def mark_unsynced(self, source: str, status: SyncStatus) -> list[dict[str, Any]]:
+        """Record that the last sync of `source` failed, and report the account it served.
+
+        The account keeps its last successful sync time. A source that never synced has
+        no account yet, so there is nothing to mark and nothing to report.
+        """
+        with self._transaction() as database:
+            key = _meta_key(database, "handle_key")
+            row = database.execute(
+                "select account_handle from sources where source_digest = ?",
+                (_source_digest(key, source),),
+            ).fetchone()
+            if row is None:
+                return []
+            database.execute(
+                "update sync_state set status = ? where account_handle = ?", (status, row[0])
+            )
+        return self.account_sync(row[0])
+
+    def account_sync(self, account: str) -> list[dict[str, Any]]:
+        """The account's sync status, as stored. Nothing here vouches for the values."""
+        with self._reader() as database:
+            rows = database.execute(
+                "select account_handle, source_kind, status, last_sync, skipped"
+                " from sync_state where account_handle = ?",
+                (account,),
+            ).fetchall()
+        return [
+            {
+                "account_handle": row[0],
+                "source_kind": row[1],
+                "status": row[2],
+                "last_sync": row[3],
+                "skipped_items": spell_skipped(row[4]),
+            }
+            for row in rows
+        ]
 
     def list_items(
         self,
@@ -239,6 +301,13 @@ def spell_count(count: int) -> str:
     return COUNT_CAPPED if count > COUNT_CAP else str(count)
 
 
+def spell_skipped(count: object) -> str:
+    """How many items were skipped, as the response spells it: capped at `10+`."""
+    if isinstance(count, int) and count > SKIPPED_CAP:
+        return SKIPPED_CAPPED
+    return str(count)
+
+
 def window(now: datetime) -> tuple[str, str]:
     """The first and last minute of the rolling window that ends at `now`, inclusive."""
     return minute(now - timedelta(days=WINDOW_DAYS)), minute(now)
@@ -269,6 +338,12 @@ def _where(account: str, now: datetime, filters: Filters) -> tuple[str, list[obj
             conditions.append(condition)
             parameters.append(value)
     return " and ".join(conditions), parameters
+
+
+def _source_digest(key: bytes, source: str) -> str:
+    """A keyed digest of a source's identity: the database never holds the identity itself."""
+    material = f"source\0{source}".encode("utf-8", "surrogatepass")
+    return hmac.new(key, material, hashlib.sha256).hexdigest()
 
 
 def _meta_key(database: sqlite3.Connection, name: str) -> bytes:

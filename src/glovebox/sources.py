@@ -19,14 +19,27 @@ from typing import Literal, Protocol
 
 ReadStatus = Literal["read", "unread", "unknown"]
 SourceKind = Literal["fixture_mail"]
+# How fresh and complete an account's data is. `current`: the last sync read the whole
+# source. `incomplete`: it did, but some items could not be understood and are missing.
+# `stale`: the last sync failed, so the data is from an earlier one. `blocked`: the last
+# sync failed because access is not granted.
+SyncStatus = Literal["current", "stale", "incomplete", "blocked"]
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 10
 
 
+# HTTP statuses that mean access to the source is not granted, as opposed to it being down.
+BLOCKED_HTTP_STATUSES = frozenset({401, 403})
+
+
 class SourceError(Exception):
     """The source could not be read or understood. It carries no detail on purpose:
     anything an upstream said stays out of exceptions, logs and responses."""
+
+
+class SourceBlocked(SourceError):
+    """The source refused access: credentials or permissions are missing, not the network."""
 
 
 @dataclass(frozen=True)
@@ -45,13 +58,23 @@ class SourceItem:
 class SourceMailbox:
     account_key: str
     items: list[SourceItem]
+    skipped: int = 0  # items that could not be understood and were left out
 
 
 class MailSource(Protocol):
     kind: SourceKind
 
+    @property
+    def identity(self) -> str:
+        """Names this configured source, so the gate can tell which account it last served."""
+        ...
+
     def fetch(self) -> SourceMailbox:
-        """Fetch the account's recent mail. Raises SourceError, never anything with detail."""
+        """Fetch the account's recent mail.
+
+        Raises SourceBlocked if access is not granted and SourceError for any other
+        failure, never anything with detail.
+        """
         ...
 
 
@@ -60,7 +83,8 @@ class FixtureMailSource:
 
     The document has the shape the stand-ins serve: an `account` and a list of
     `messages`. Each message needs `id`, `from` and `received`; `thread`, `read` and
-    `attachments` are optional. A message that cannot be understood is skipped.
+    `attachments` are optional. A message that cannot be understood is skipped and
+    counted.
     """
 
     kind: SourceKind = "fixture_mail"
@@ -68,9 +92,22 @@ class FixtureMailSource:
     def __init__(self, location: Path | str) -> None:
         self._location = location
 
+    @property
+    def identity(self) -> str:
+        return str(self._location)
+
     def fetch(self) -> SourceMailbox:
         try:
             return parse_mailbox(json.loads(self._read()))
+        except SourceError:
+            raise
+        except urllib.error.HTTPError as error:
+            error.close()
+            if error.code in BLOCKED_HTTP_STATUSES:
+                raise SourceBlocked from None
+            raise SourceError from None
+        except PermissionError:
+            raise SourceBlocked from None
         except (
             OSError,
             ValueError,  # includes bad JSON and bad UTF-8
@@ -101,11 +138,14 @@ def parse_mailbox(document: object) -> SourceMailbox:
     if not isinstance(account, str) or not account or not isinstance(messages, list):
         raise SourceError
     items: dict[str, SourceItem] = {}
+    skipped = 0
     for message in messages:
         item = parse_message(message)
-        if item is not None and item.upstream_id not in items:
+        if item is None:
+            skipped += 1
+        elif item.upstream_id not in items:
             items[item.upstream_id] = item
-    return SourceMailbox(account_key=account, items=list(items.values()))
+    return SourceMailbox(account_key=account, items=list(items.values()), skipped=skipped)
 
 
 def parse_message(message: object) -> SourceItem | None:

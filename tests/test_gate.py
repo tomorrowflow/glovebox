@@ -275,9 +275,12 @@ async def test_the_read_tool_returns_only_structured_permitted_fields(
     assert set(result.meta or {}) <= {"io.modelcontextprotocol/serverInfo"}
     structured = result.structured_content
     assert isinstance(structured, dict)
-    assert set(structured) == {"error", "items", "next_cursor"}
+    assert set(structured) == {"error", "accounts", "items", "next_cursor"}
     assert structured["next_cursor"] is None
     assert structured["error"] == "none"
+    (sync,) = structured["accounts"]
+    assert set(sync) == {"account_handle", "source_kind", "status", "last_sync", "skipped_items"}
+    assert (sync["status"], sync["skipped_items"]) == ("current", "0")
     items = result_items(result)
     # Newest first.
     assert [item["received"] for item in items] == [
@@ -322,7 +325,10 @@ async def test_a_call_with_arguments_or_an_unknown_tool_gets_a_fixed_error(
             unknown = await client.call_tool("send_email", {})
 
     for result, expected in (
-        (with_arguments, {"error": "invalid_arguments", "items": [], "next_cursor": None}),
+        (
+            with_arguments,
+            {"error": "invalid_arguments", "accounts": [], "items": [], "next_cursor": None},
+        ),
         (unknown, {"error": "unknown_tool"}),
     ):
         assert result.is_error is True
@@ -347,17 +353,21 @@ async def test_a_source_that_cannot_be_read_is_a_fixed_error_not_an_empty_inbox(
                 assert result.is_error is True
                 assert result.content == []
                 assert_no_corpus({"result": result.model_dump_json(by_alias=True)})
+            # Nothing ever synced, so there is no account to report on.
             assert results[LIST_TOOL].structured_content == {
                 "error": "source_unavailable",
+                "accounts": [],
                 "items": [],
                 "next_cursor": None,
             }
             assert results[COUNT_TOOL].structured_content == {
                 "error": "source_unavailable",
+                "accounts": [],
                 "count": "0",
             }
             assert results[GROUP_TOOL].structured_content == {
                 "error": "source_unavailable",
+                "accounts": [],
                 "groups": [],
                 "next_cursor": None,
             }
@@ -490,8 +500,14 @@ async def test_a_response_that_fails_validation_is_replaced_by_the_fixed_error(
             grouped = await client.call_tool(GROUP_TOOL, {"group_by": "read_status"})
 
     refusals: list[tuple[types.CallToolResult, dict[str, object]]] = [
-        (listed, {"error": "response_invalid", "items": [], "next_cursor": None}),
-        (grouped, {"error": "response_invalid", "groups": [], "next_cursor": None}),
+        (
+            listed,
+            {"error": "response_invalid", "accounts": [], "items": [], "next_cursor": None},
+        ),
+        (
+            grouped,
+            {"error": "response_invalid", "accounts": [], "groups": [], "next_cursor": None},
+        ),
     ]
     for result, expected in refusals:
         assert result.is_error is True
@@ -544,6 +560,7 @@ async def test_an_unseeded_stand_in_is_a_fixed_error(
     assert result.is_error is True
     assert result.structured_content == {
         "error": "source_unavailable",
+        "accounts": [],
         "items": [],
         "next_cursor": None,
     }

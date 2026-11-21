@@ -30,7 +30,7 @@ from glovebox.query import (
     encode_cursor,
     query_digest,
 )
-from glovebox.sources import MailSource, SourceError
+from glovebox.sources import MailSource, SourceBlocked, SourceError, SyncStatus
 from glovebox.store import Store
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,12 @@ FILTERS_TEXT = (
     "Filters, all optional and combined with AND: read status, received-time range "
     "(inclusive, minute precision), attachment presence, sender handle, thread handle "
     "and account handle."
+)
+SYNC_TEXT = (
+    "Every result names the account's sync status (current, stale, incomplete or blocked), "
+    "its last successful sync time and a capped count of skipped items. If the source cannot "
+    "be read, the result is the error source_unavailable with that status, never an empty "
+    "success."
 )
 
 
@@ -80,7 +86,7 @@ SPECS: dict[str, ToolSpec] = {
             f"{FILTERS_TEXT} Fixed sort orders only: received_desc, received_asc, "
             f"unread_first, attachments_first. At most {MAX_ITEMS} items per page; "
             "next_cursor is an opaque cursor for the next page, valid only for the same "
-            "caller and query. No message text is returned.",
+            f"caller and query. {SYNC_TEXT} No message text is returned.",
             ListInput,
             ListOutput,
         ),
@@ -91,7 +97,7 @@ SPECS: dict[str, ToolSpec] = {
         _definition(
             COUNT_TOOL,
             f"Counts the mail items of the last 30 days that match the filters. {FILTERS_TEXT} "
-            "A count above 1000 is reported as 1000+.",
+            f"A count above 1000 is reported as 1000+. {SYNC_TEXT}",
             CountInput,
             CountOutput,
         ),
@@ -105,7 +111,7 @@ SPECS: dict[str, ToolSpec] = {
             "sender handle, thread handle, read status or source kind. Largest groups first. "
             f"{FILTERS_TEXT} A count above 1000 is reported as 1000+. At most {MAX_ITEMS} "
             "groups per page; next_cursor is an opaque cursor for the next page, valid only "
-            "for the same caller and query.",
+            f"for the same caller and query. {SYNC_TEXT}",
             GroupInput,
             GroupOutput,
         ),
@@ -175,13 +181,19 @@ class ReadTool:
             return error_result("source_unavailable", spec.output)
 
         with self._sync:
+            now = self._clock()
             try:
                 mailbox = self._source.fetch()
-            except SourceError:
-                logger.warning("source unavailable")
-                return error_result("source_unavailable", spec.output)
-            now = self._clock()
-            account = self._store.replace_mailbox(self._source.kind, mailbox, now)
+            except SourceError as failure:
+                # The account keeps its last good sync time and says how it went stale.
+                status: SyncStatus = "blocked" if isinstance(failure, SourceBlocked) else "stale"
+                accounts = self._store.mark_unsynced(self._source.identity, status)
+                logger.warning("source sync failed: %s", status)
+                return error_result("source_unavailable", spec.output, accounts)
+            account = self._store.replace_mailbox(
+                self._source.kind, self._source.identity, mailbox, now
+            )
+            accounts = self._store.account_sync(account)
             filters = request.only_filters()
             if isinstance(request, ListInput) and paging is not None:
                 # One row past the page tells whether there is a next one.
@@ -190,7 +202,11 @@ class ReadTool:
                 )
                 items = rows[: request.limit]
                 return success_result(
-                    {"items": items, "next_cursor": paging.next(len(items), len(rows) > len(items))}
+                    {
+                        "accounts": accounts,
+                        "items": items,
+                        "next_cursor": paging.next(len(items), len(rows) > len(items)),
+                    }
                 )
             if isinstance(request, GroupInput) and paging is not None:
                 found = self._store.group_items(
@@ -199,11 +215,14 @@ class ReadTool:
                 groups = found[: request.limit]
                 return success_result(
                     {
+                        "accounts": accounts,
                         "groups": groups,
                         "next_cursor": paging.next(len(groups), len(found) > len(groups)),
                     }
                 )
-            return success_result({"count": self._store.count_items(account, now, filters)})
+            return success_result(
+                {"accounts": accounts, "count": self._store.count_items(account, now, filters)}
+            )
 
 
 @dataclass(frozen=True)

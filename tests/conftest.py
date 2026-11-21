@@ -21,6 +21,7 @@ class RunningGate:
     url: str
     token: str
     db: Path
+    log: Path  # what the service wrote to stdout and stderr, across restarts of the same db
 
 
 @pytest.fixture
@@ -70,17 +71,24 @@ def run_gate(
         env["GLOVEBOX_MAIL_FIXTURE"] = str(mail_fixture)
     if mail_url is not None:
         env["GLOVEBOX_STANDIN_MAILBOX_MAIL"] = mail_url
-    process = subprocess.Popen([sys.executable, "-m", "glovebox"], env=env)
-    try:
-        deadline = time.monotonic() + 15
-        while not _accepts_connections(port):
-            if process.poll() is not None or time.monotonic() > deadline:
-                raise RuntimeError("the service did not start")
-            time.sleep(0.05)
-        yield RunningGate(url=f"http://127.0.0.1:{port}/mcp", token=token, db=db)
-    finally:
-        process.terminate()
-        process.wait(timeout=10)
+    log = db.with_name(db.stem + ".log")
+    with log.open("ab") as log_file:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "glovebox"],
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while not _accepts_connections(port):
+                if process.poll() is not None or time.monotonic() > deadline:
+                    raise RuntimeError("the service did not start")
+                time.sleep(0.05)
+            yield RunningGate(url=f"http://127.0.0.1:{port}/mcp", token=token, db=db, log=log)
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
 
 
 GateStarter = Callable[..., AbstractContextManager[RunningGate]]

@@ -8,14 +8,15 @@ the entire response and, if anything is off, returns the fixed error instead; no
 of the failed response survives.
 """
 
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from mcp import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from glovebox.fields import Count, Cursor, Handle, Minute
+from glovebox.fields import Count, Cursor, Handle, Minute, SkippedCount
 from glovebox.formats import MAX_ITEMS
-from glovebox.sources import ReadStatus, SourceKind
+from glovebox.sources import ReadStatus, SourceKind, SyncStatus
 
 ErrorCode = Literal[
     "none",
@@ -50,12 +51,32 @@ class MailItem(BaseModel):
     has_attachments: bool
 
 
-class ListOutput(Output):
+class AccountSync(BaseModel):
+    """How fresh one account's data is: a status, the last sync that read the source, and
+    how many items of it could not be understood."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    account_handle: Handle
+    source_kind: SourceKind
+    status: SyncStatus
+    last_sync: Minute
+    skipped_items: SkippedCount
+
+
+class ReadOutput(Output):
+    """What every read tool says about the accounts behind its answer, so that an outage
+    or a stale account is never mistaken for an empty one."""
+
+    accounts: list[AccountSync] = Field(default=[], max_length=MAX_ITEMS)
+
+
+class ListOutput(ReadOutput):
     items: list[MailItem] = Field(default=[], max_length=MAX_ITEMS)
     next_cursor: Cursor | None = None
 
 
-class CountOutput(Output):
+class CountOutput(ReadOutput):
     count: Count = "0"
 
 
@@ -66,19 +87,26 @@ class Group(BaseModel):
     count: Count
 
 
-class GroupOutput(Output):
+class GroupOutput(ReadOutput):
     groups: list[Group] = Field(default=[], max_length=MAX_ITEMS)
     next_cursor: Cursor | None = None
 
 
-def error_result(code: ErrorCode, model: type[Output] = Output) -> types.CallToolResult:
+def error_result(
+    code: ErrorCode,
+    model: type[Output] = Output,
+    accounts: Sequence[Mapping[str, object]] = (),
+) -> types.CallToolResult:
     """The response for a failure: a server constant, never anything of the cause.
 
-    `model` shapes the empty payload so that it fits the tool's output schema.
+    `model` shapes the empty payload so that it fits the tool's output schema. Only a
+    source outage carries `accounts`, the freshness of what the gate last served; they
+    are checked by `release` like everything else.
     """
-    return types.CallToolResult(
-        content=[], structured_content=model(error=code).model_dump(mode="json"), is_error=True
-    )
+    structured = model(error=code).model_dump(mode="json")
+    if accounts:
+        structured["accounts"] = [dict(account) for account in accounts]
+    return types.CallToolResult(content=[], structured_content=structured, is_error=True)
 
 
 def success_result(payload: dict[str, object]) -> types.CallToolResult:
@@ -107,9 +135,17 @@ def _is_permitted(result: object, model: type[Output]) -> bool:
         if output.model_dump(mode="json") != structured:
             return False
         failed = output.error != "none"
-        # A failure carries nothing but its code, in the shape of the tool's schema.
-        return result.is_error == failed and (
-            not failed or structured == model(error=output.error).model_dump(mode="json")
-        )
+        if result.is_error != failed:
+            return False
+        if not failed:
+            return True
+        # A failure carries nothing but its code, in the shape of the tool's schema. A
+        # source outage also carries the freshness of the accounts it affects.
+        if not isinstance(structured, dict):
+            return False
+        bare = model(error=output.error).model_dump(mode="json")
+        if isinstance(output, ReadOutput) and output.error == "source_unavailable":
+            return {**structured, "accounts": []} == bare
+        return structured == bare
     except (ValidationError, ValueError, TypeError):
         return False
