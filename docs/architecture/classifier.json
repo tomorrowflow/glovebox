@@ -22,7 +22,7 @@
   ],
   "evidence": [
     {"id": "config", "file": "src/glovebox/classifier_config.py", "line": 57, "note": "Read once at startup from the operator's JSON file; topic names and descriptions stay here and are never served."},
-    {"id": "tool", "file": "src/glovebox/tool.py", "line": 215, "note": "Reuses a cached classification or classifies the item; one item's failure changes no other."},
+    {"id": "tool", "file": "src/glovebox/tool.py", "line": 217, "note": "Reuses a cached classification or classifies the item; one item's failure changes no other."},
     {"id": "store", "file": "src/glovebox/store.py", "line": 389, "note": "A stored classification is reused only for the same text digest and configuration digest, and never when it was unavailable."},
     {"id": "quarantine", "file": "src/glovebox/classification.py", "line": 88, "note": "The only code that reads the classifier's output: parses it and checks each of the four fields against its closed vocabulary; failures become unknown."},
     {"id": "stub", "file": "src/glovebox/stub.py", "line": 33, "note": "Deterministic stand-in for a model; real inference is a later ticket."},

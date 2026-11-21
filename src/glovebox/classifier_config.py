@@ -15,7 +15,7 @@ from typing import Any
 
 from glovebox.classification import DeadlineRange, Topic
 from glovebox.config import ConfigError
-from glovebox.formats import MAX_TOPICS, MINUTE_FORMAT, RESERVED_TOPICS, TOPIC_ID_PATTERN
+from glovebox.formats import MAX_TOPICS, MINUTE_FORMAT, RESERVED_TOPICS, TOPIC_ID_PATTERN, minute
 
 BACKENDS = ("stub",)
 PROFILE_PATTERN = re.compile(r"[a-z0-9._-]{1,32}")
@@ -43,15 +43,13 @@ class ClassifierConfig:
         document = {
             "version": VALIDATION_VERSION,
             "topics": [[topic.id, topic.name, topic.description] for topic in self.topics],
-            "deadline_range": [_spell(range_.start), _spell(range_.end)],
+            "deadline_range": [
+                None if moment is None else minute(moment) for moment in (range_.start, range_.end)
+            ],
             "inference": [self.backend, self.profile],
         }
         text = json.dumps(document, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode()).hexdigest()
-
-
-def _spell(moment: datetime | None) -> str | None:
-    return None if moment is None else moment.strftime(MINUTE_FORMAT)
 
 
 def load_classifier_config(path: Path | None) -> ClassifierConfig:

@@ -130,8 +130,12 @@ def validate(
     reply_needed = _yes_no(proposal.get("reply_needed"))
     action_requested = _yes_no(proposal.get("action_requested"))
     deadline_valid, deadline = _deadline(proposal.get("deadline"), earliest, latest)
-    valid = [topic is not None, reply_needed is not None, action_requested is not None]
-    valid.append(deadline_valid)
+    valid = [
+        topic is not None,
+        reply_needed is not None,
+        action_requested is not None,
+        deadline_valid,
+    ]
     status: ClassificationStatus = (
         "classified" if all(valid) else "partial" if any(valid) else "invalid"
     )
