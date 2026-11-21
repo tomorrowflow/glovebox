@@ -91,10 +91,11 @@ class Store:
                 raise
             database.execute("commit")
 
-    def replace_mailbox(
-        self, kind: SourceKind, mailbox: SourceMailbox, synced_at: datetime
-    ) -> None:
-        """Make the account's stored items match one complete fetch, in one transaction."""
+    def replace_mailbox(self, kind: SourceKind, mailbox: SourceMailbox, synced_at: datetime) -> str:
+        """Make the account's stored items match one complete fetch, in one transaction.
+
+        Returns the account's handle.
+        """
         with self._transaction() as database:
             key = bytes.fromhex(
                 database.execute("select value from meta where key = 'handle_key'").fetchone()[0]
@@ -119,15 +120,20 @@ class Store:
                 "insert or replace into sync_state values (?, ?, 'current', ?)",
                 (account, kind, minute(synced_at)),
             )
+        return account
 
-    def recent_items(self, limit: int) -> list[dict[str, Any]]:
-        """The newest items first, as stored. Nothing here vouches for the values."""
+    def recent_items(self, account: str, limit: int) -> list[dict[str, Any]]:
+        """One account's newest items first, as stored. Nothing here vouches for the values.
+
+        Items of any other account in the database, such as one the source served
+        before it was reconfigured, are not served.
+        """
         with self._transaction() as database:
             rows = database.execute(
                 "select item_handle, account_handle, source_kind, sender_handle, thread_handle,"
-                " received, read_status, has_attachments from items"
+                " received, read_status, has_attachments from items where account_handle = ?"
                 " order by received desc, item_handle limit ?",
-                (limit,),
+                (account, limit),
             ).fetchall()
         return [
             {

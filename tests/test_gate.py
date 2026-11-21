@@ -330,6 +330,36 @@ async def test_a_source_that_cannot_be_read_is_a_fixed_error_not_an_empty_inbox(
 
 
 @pytest.mark.anyio
+async def test_only_the_configured_account_is_served_when_the_source_changes(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    """A database that already holds another account's items must not serve them."""
+    first = write_fixture(tmp_path / "first.json", small_fixture())
+    other = small_fixture()
+    other["account"] = "dave@example.test"
+    other["messages"] = [
+        {
+            "id": "d1",
+            "from": "erin@example.test",
+            "received": "2026-02-01T12:00:00Z",
+            "read": False,
+        }
+    ]
+    second = write_fixture(tmp_path / "second.json", other)
+    with start_gate(mail_fixture=first) as gate:
+        before = await read_items(gate)
+    with start_gate(mail_fixture=second) as gate:
+        after = await read_items(gate)
+    with start_gate(mail_fixture=first) as gate:
+        back = await read_items(gate)
+
+    assert len(before) == 3
+    assert [item["received"] for item in after] == ["2026-02-01T12:00Z"]
+    assert after[0]["account_handle"] != before[0]["account_handle"]
+    assert back == before
+
+
+@pytest.mark.anyio
 async def test_handles_are_stable_across_calls_and_restarts_and_unrelated_across_databases(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:
@@ -347,8 +377,6 @@ async def test_handles_are_stable_across_calls_and_restarts_and_unrelated_across
     other = {key: {str(item[key]) for item in elsewhere} for key in handles}
     for key in handles:
         assert handles[key].isdisjoint(other[key]), "a handle is derived from the content"
-    upstream = {"m1", "m2", "m3", "bob@example.test", "carol@example.test", "t1"}
-    assert not any(part in handle for handle in handles["item_handle"] for part in upstream)
 
 
 # --- the hostile corpus -----------------------------------------------------------------

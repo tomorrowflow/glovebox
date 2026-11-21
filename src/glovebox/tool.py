@@ -63,5 +63,5 @@ class ReadTool:
             except SourceError:
                 logger.warning("source unavailable")
                 return error_result("source_unavailable")
-            self._store.replace_mailbox(self._source.kind, mailbox, datetime.now(UTC))
-            return success_result(self._store.recent_items(MAX_ITEMS))
+            account = self._store.replace_mailbox(self._source.kind, mailbox, datetime.now(UTC))
+            return success_result(self._store.recent_items(account, MAX_ITEMS))
