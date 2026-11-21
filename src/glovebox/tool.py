@@ -137,13 +137,14 @@ class ReadTool:
         `principal` is the identity of the authenticated caller; page cursors are bound to it.
         """
         spec = SPECS.get(name)
+        output = spec.output if spec else Output
         try:
             response = await anyio.to_thread.run_sync(self._respond, name, arguments, principal)
-            return release(response, spec.output if spec else Output)
+            return release(response, output)
         except Exception as error:
             # Only the type is logged: an exception message may hold upstream text.
             logger.error("tool call failed: %s", type(error).__name__)
-            return release(error_result("internal_error", spec.output if spec else Output))
+            return release(error_result("internal_error", output))
 
     def _respond(
         self, name: str, arguments: Mapping[str, Any] | None, principal: str | None

@@ -417,7 +417,8 @@ async def test_counts_above_one_thousand_are_reported_as_1000_plus(
             assert everything == {"error": "none", "count": "1000+"}
             grouped = await call(client, GROUP_TOOL, group_by="read_status")
             assert grouped["groups"] == [{"key": "unread", "count": "1000+"}]
-            # No number above the cap, nor a precise one, is reachable through paging either.
+            # A page is still 50 items. Walking every page does reveal a total above the
+            # cap: that side channel is bounded by the page size, not closed (ADR 0001, b).
             listed = await call(client, LIST_TOOL)
             assert len(listed["items"]) == 50
 
@@ -615,6 +616,29 @@ async def test_mail_outside_the_window_is_not_ingested(
     assert minted == 4
 
 
+@pytest.mark.anyio
+async def test_stored_items_of_another_account_are_dropped_when_they_leave_the_window(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    """Below the seam on purpose: what the database keeps is not visible to an agent."""
+    first = mailbox([mail("a1", "bob", "2026-01-05T09:00:00Z")])
+    second = mailbox([mail("b1", "bob", "2026-02-12T09:00:00Z")])
+    second["account"] = "dave@example.test"
+    first_path = write_fixture(tmp_path / "first.json", first)
+    second_path = write_fixture(tmp_path / "second.json", second)
+    with start_gate("one.db", mail_fixture=first_path) as gate:
+        async with agent_client(gate) as client:
+            await call(client, LIST_TOOL)
+    with sqlite3.connect(gate.db) as database:
+        assert database.execute("select count(*) from items").fetchone()[0] == 1
+    with start_gate("one.db", mail_fixture=second_path, now="2026-02-14T12:00:00Z") as gate:
+        async with agent_client(gate) as client:
+            await call(client, LIST_TOOL)
+    with sqlite3.connect(gate.db) as database:
+        stored = [row[0] for row in database.execute("select received from items")]
+    assert stored == ["2026-02-12T09:00Z"]
+
+
 # --- timestamps -------------------------------------------------------------------------
 
 
@@ -627,6 +651,8 @@ async def test_timestamps_are_minute_precision_in_and_out(
             listed = await call(client, LIST_TOOL)
             assert all(MINUTE.match(item["received"]) for item in listed["items"])
             for value in (
+                "２０２６-01-06T08:00Z",  # full-width digits
+                "2026-01-06T٠٨:00Z",  # Arabic-Indic digits
                 "2026-01-06T08:00:30Z",
                 "2026-01-06T08:00:00Z",
                 "2026-01-06T08:00",

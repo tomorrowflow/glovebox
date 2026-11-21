@@ -2,8 +2,8 @@
 
 It offers three read tools (list, count, group) and nothing else: no resources, no
 prompts, no write tool. The server is built on the low-level SDK server so that only
-the two tool handlers exist; capabilities are derived from the handlers, so none can be
-advertised by accident.
+the tool-listing and tool-call handlers exist; capabilities are derived from the
+handlers, so none can be advertised by accident.
 """
 
 import os

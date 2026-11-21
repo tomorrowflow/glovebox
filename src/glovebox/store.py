@@ -125,14 +125,15 @@ class Store:
     def replace_mailbox(self, kind: SourceKind, mailbox: SourceMailbox, synced_at: datetime) -> str:
         """Make the account's stored items match one complete fetch, in one transaction.
 
-        Mail outside the rolling window at `synced_at` is not ingested. Returns the
-        account's handle.
+        Mail outside the rolling window at `synced_at` is not ingested, and items of
+        any account that have left the window are dropped. Returns the account's handle.
         """
         window_start, window_end = window(synced_at)
         with self._transaction() as database:
             key = _meta_key(database, "handle_key")
             account = _handle(database, key, "account", "", mailbox.account_key)
             database.execute("delete from items where account_handle = ?", (account,))
+            database.execute("delete from items where received < ?", (window_start,))
             for item in mailbox.items:
                 if not window_start <= minute(item.received) <= window_end:
                     continue

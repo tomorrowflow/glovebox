@@ -1,6 +1,6 @@
 """Closed value types shared by tool inputs and outputs.
 
-None is a free string: each is a handle, a minute-precision timestamp, a count or a
+No type here is a free string: each is a handle, a minute-precision timestamp, a count or a
 page cursor, with a fixed length and an anchored pattern.
 """
 

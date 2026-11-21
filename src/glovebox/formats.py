@@ -6,7 +6,8 @@ HANDLE_LENGTH = 24
 HANDLE_PATTERN = rf"^[a-z2-7]{{{HANDLE_LENGTH}}}$"
 
 MINUTE_FORMAT = "%Y-%m-%dT%H:%MZ"
-MINUTE_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$"
+# [0-9], not \d: the validator's regex engine takes \d to match digits of any script.
+MINUTE_PATTERN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z$"
 MINUTE_LENGTH = 17
 
 # Limits that bound side channels (ADR 0001).
