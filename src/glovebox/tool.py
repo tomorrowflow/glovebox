@@ -149,14 +149,16 @@ class ReadTool:
 
     async def definitions(self, principal: str | None) -> list[types.Tool]:
         """The tools the caller's token may use, and no others."""
-        grant = (
-            None
-            if principal is None
-            else await anyio.to_thread.run_sync(self._access.grant, principal)
-        )
+        grant = await self._grant(principal)
         if grant is None:
             return []
         return [spec.definition for name, spec in SPECS.items() if name in grant.operations]
+
+    async def _grant(self, principal: str | None) -> Grant | None:
+        # The database may be busy for a while: never wait for it on the event loop.
+        if principal is None:
+            return None
+        return await anyio.to_thread.run_sync(self._access.grant, principal)
 
     async def call(
         self, name: str, arguments: Mapping[str, Any] | None, principal: str | None
@@ -168,7 +170,7 @@ class ReadTool:
         """
         output: type[Output] = Output
         try:
-            grant = None if principal is None else self._access.grant(principal)
+            grant = await self._grant(principal)
             spec = None if grant is None else _permitted_spec(name, grant.operations)
             if spec is not None:
                 output = spec.output

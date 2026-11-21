@@ -761,6 +761,62 @@ def test_the_fixture_bootstrap_refuses_an_incomplete_or_unusable_setup(
     assert "short" not in result.stderr and FIXTURE_TOKEN not in result.stdout + result.stderr
 
 
+def test_the_gate_says_at_start_which_accounts_it_will_not_serve(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    db = tmp_path / "glovebox.db"
+    source = write_fixture(tmp_path / "mail.json", small_fixture())
+    credentials = credentials_file(tmp_path, 0o600)
+    base = ("account", "add", DEFAULT_ACCOUNT, "--kind", "fixture_mail", "--source", str(source))
+    assert operator(db, *base, "--credentials", str(credentials)).returncode == 0
+    credentials.chmod(0o644)
+
+    with start_gate(accounts={DEFAULT_ACCOUNT: source}) as gate:
+        pass
+
+    log = gate.log.read_text()
+    assert f"account {DEFAULT_ACCOUNT} is not served" in log
+    assert "accessible to group or others" in log and SECRET not in log
+
+
+def test_revoking_does_not_repeat_what_was_typed_when_it_is_no_id(tmp_path: Path) -> None:
+    db = tmp_path / "glovebox.db"
+    source = write_fixture(tmp_path / "mail.json", small_fixture())
+    operator(db, "account", "add", "work", "--kind", "fixture_mail", "--source", str(source))
+    value = operator(db, "token", "issue", "--account", "work").stdout.strip()
+
+    pasted = operator(db, "token", "revoke", value)
+
+    assert pasted.returncode != 0
+    assert value not in pasted.stdout + pasted.stderr
+    # The token is still active: nothing was revoked by mistake.
+    assert "active" in operator(db, "token", "list").stdout
+
+
+@pytest.mark.anyio
+async def test_the_fixture_token_covers_the_fixture_account_again_after_it_was_removed(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "stack.db"
+    source = write_fixture(tmp_path / "mail.json", small_fixture())
+
+    def start() -> Any:
+        return run_gate(
+            db,
+            accounts={},
+            tokens={},
+            extra_env=fixture_env(source),
+            command=("serve", "--bootstrap-fixture"),
+        )
+
+    with start():
+        pass
+    assert operator(db, "account", "remove", "fixture").returncode == 0
+    with start() as gate:
+        async with agent_client(gate, token=FIXTURE_TOKEN) as client:
+            assert (await call(client, COUNT_TOOL))["count"] == "3"
+
+
 def test_the_commands_of_the_operator_do_not_need_the_service_to_run(tmp_path: Path) -> None:
     """`account` and `token` work on the file alone; no server is listening anywhere."""
     db = tmp_path / "glovebox.db"

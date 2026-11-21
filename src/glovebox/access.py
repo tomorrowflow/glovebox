@@ -247,7 +247,8 @@ class Access:
                 "select revoked from tokens where id = ?", (token_id,)
             ).fetchone()
             if row is None:
-                raise AccessError(f"no token with id {token_id}")
+                # Not repeated: what was typed may be a token value pasted by mistake.
+                raise AccessError("no token has that id; `token list` shows the ids")
             if row[0] is not None:
                 return False
             database.execute("update tokens set revoked = ? where id = ?", (revoked, token_id))
@@ -266,12 +267,19 @@ class Access:
             self.add_account(name, kind, source)
         elif account.source != source:
             self.set_source(name, source)
-        with db.reader(self._path) as database:
+        with db.transaction(self._path) as database:
             known = database.execute(
-                "select 1 from tokens where digest = ?", (digest_of(token),)
+                "select id, revoked from tokens where digest = ?", (digest_of(token),)
             ).fetchone()
-        if known is not None:
-            return False
+            if known is not None:
+                if known[1] is None:
+                    # An account added again after the operator removed it is covered again.
+                    database.execute(
+                        "insert or ignore into token_accounts"
+                        " select ?, handle from accounts where name = ?",
+                        (known[0], name),
+                    )
+                return False
         self.issue_token([name], label="fixture", value=token)
         return True
 

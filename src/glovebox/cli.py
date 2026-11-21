@@ -19,6 +19,8 @@ from glovebox.config import ConfigError, Settings
 from glovebox.credentials import CredentialsError, read_credentials
 from glovebox.sources import SOURCE_KINDS
 
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
 FIXTURE_ACCOUNT = "fixture"
 FIXTURE_TOKEN_VAR = "GLOVEBOX_FIXTURE_TOKEN"
 FIXTURE_URL_VAR = "GLOVEBOX_STANDIN_MAILBOX_MAIL"
@@ -182,11 +184,33 @@ def serve(argv: Sequence[str], env: Mapping[str, str]) -> int:
 
         from glovebox.server import create_app
 
-        app = create_app(Settings.from_env(env))
+        settings = Settings.from_env(env)
+        app = create_app(settings)
+        refused = unusable_accounts(Access(settings.db_path))
     except (AccessError, ConfigError) as error:
         print(f"glovebox: {error}", file=sys.stderr)
         return 1
+    for name, reason in refused:
+        print(f"glovebox: account {name} is not served: {reason}", file=sys.stderr)
     uvicorn.run(
-        app, host=env.get("GLOVEBOX_HOST", "127.0.0.1"), port=int(env.get("GLOVEBOX_PORT", 8765))
+        app,
+        host=env.get("GLOVEBOX_HOST", DEFAULT_HOST),
+        port=int(env.get("GLOVEBOX_PORT", DEFAULT_PORT)),
     )
     return 0
+
+
+def unusable_accounts(access: Access) -> list[tuple[str, str]]:
+    """The accounts whose credentials file the gate refuses to use, with the reason.
+
+    They are refused on every request too; this tells the operator at start.
+    """
+    refused = []
+    for account in access.accounts():
+        if account.credentials is None:
+            continue
+        try:
+            read_credentials(account.credentials)
+        except CredentialsError as error:
+            refused.append((account.name, str(error)))
+    return refused

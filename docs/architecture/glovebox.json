@@ -27,7 +27,7 @@
   ],
   "evidence": [
     {"id": "client", "file": "tests/client.py", "line": 24, "note": "Only the acceptance tests' MCP client connects today; inferred as the agent."},
-    {"id": "uvicorn", "file": "src/glovebox/cli.py", "line": 189, "note": "uvicorn.run serves the app."},
+    {"id": "uvicorn", "file": "src/glovebox/cli.py", "line": 195, "note": "uvicorn.run serves the app."},
     {"id": "auth", "file": "src/glovebox/auth.py", "line": 17, "note": "Outermost middleware; looks the bearer token up in the database on every request, so a revoked token stops at once, and records the token's id, which page cursors and the token's accounts are bound to."},
     {"id": "mcp", "file": "src/glovebox/server.py", "line": 32, "note": "Low-level Server with only tools/list and tools/call handlers: no resources, prompts or operator commands. A token is shown only the tools its operations name."},
     {"id": "tool", "file": "src/glovebox/tool.py", "line": 143, "note": "Validates the call's inputs, checks the cursor, fetches and queries only the token's accounts, and answers from the store; the sort orders, filters and the 1000+ cap live in store.py."},
@@ -39,9 +39,9 @@
     {"id": "uvicorn>auth", "file": "src/glovebox/server.py", "line": 56, "note": "add_middleware makes the token check the outermost layer of the app."},
     {"id": "auth>mcp", "file": "src/glovebox/auth.py", "line": 30},
     {"id": "mcp>tool", "file": "src/glovebox/server.py", "line": 41},
-    {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 233},
-    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 243},
-    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 182},
-    {"id": "main>uvicorn", "file": "src/glovebox/cli.py", "line": 189}
+    {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 235},
+    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 245},
+    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 184},
+    {"id": "main>uvicorn", "file": "src/glovebox/cli.py", "line": 195}
   ]
 }

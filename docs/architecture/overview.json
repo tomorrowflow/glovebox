@@ -17,6 +17,6 @@
     {"id": "glovebox", "file": "src/glovebox/tool.py", "line": 143, "note": "The read tools list_accounts, list_items, count_items and group_items return permitted fields only, for the accounts the token covers."},
     {"id": "mail", "file": "src/glovebox/sources.py", "line": 65, "note": "Fixture source: a file or the mailbox.org mail stand-in."},
     {"id": "agent>glovebox", "file": "src/glovebox/auth.py", "line": 17, "note": "The client reaches the service at /mcp over Streamable HTTP with a bearer token the operator issued and can revoke."},
-    {"id": "glovebox>mail", "file": "src/glovebox/tool.py", "line": 233}
+    {"id": "glovebox>mail", "file": "src/glovebox/tool.py", "line": 235}
   ]
 }
