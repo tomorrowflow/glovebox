@@ -134,7 +134,18 @@ The production host is the Mac mini, the same machine as test and a different us
 2. As `frogger`, clone the repository to `~/glovebox` if it is not there, and check out exactly that commit: `git -C ~/glovebox fetch origin && git -C ~/glovebox checkout --detach <commit>`.
 3. Build the virtualenv at that commit with Homebrew Python 3.12 or newer, with the pinned dependencies: `cd ~/glovebox && /opt/homebrew/bin/python3 -m venv .venv && .venv/bin/pip install -c constraints.txt -e .`. Production does not use `scripts/env.py`, `compose.yaml`, the stand-ins or the fixtures, and it does not use `.env` of test.
 4. Provide the production configuration and secrets from the operator's own store, in files only `frogger` can read: `install -d -m 700 ~/.config/glovebox` and then `~/.config/glovebox/gate.env` with `chmod 600`, as `KEY=VALUE` lines. Do not copy anything from test. Never put a secret in the plist, in the checkout or in a log.
-5. Install the launchd plist as a LaunchAgent. `deploy/launchd/glovebox.prod.gate.plist` is a template; fill it in and write it to `~/Library/LaunchAgents/`, then create the log directory: `mkdir -p ~/Library/Logs/glovebox`, `sed -e "s|@REPO@|$HOME/glovebox|g" -e "s|@HOME@|$HOME|g" -e "s|@SECRETS@|$HOME/.config/glovebox/gate.env|g" deploy/launchd/glovebox.prod.gate.plist > ~/Library/LaunchAgents/glovebox.prod.gate.plist`, and `plutil -lint` it. The paths must not contain `&`, `|` or `<` (`sed` does not escape them for XML). The agent sources `gate.env` and runs `.venv/bin/glovebox`. Load it in `frogger`'s GUI session: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/glovebox.prod.gate.plist`. It starts at every login of `frogger`, so after a reboot the Mac mini must log `frogger` in (automatic login, or the operator).
+5. Install the launchd plist as a LaunchAgent. `deploy/launchd/glovebox.prod.gate.plist` is a template. A fresh account has neither `~/Library/LaunchAgents` nor the log directory, and launchd creates neither, so make both, then fill in the template, then lint the result:
+
+   ```sh
+   mkdir -p ~/Library/LaunchAgents ~/Library/Logs/glovebox
+   sed -e "s|@REPO@|$HOME/glovebox|g" -e "s|@HOME@|$HOME|g" \
+       -e "s|@SECRETS@|$HOME/.config/glovebox/gate.env|g" \
+       ~/glovebox/deploy/launchd/glovebox.prod.gate.plist \
+       > ~/Library/LaunchAgents/glovebox.prod.gate.plist
+   plutil -lint ~/Library/LaunchAgents/glovebox.prod.gate.plist
+   ```
+
+   The paths must not contain `&`, `|` or `<` (`sed` does not escape them for XML). The agent sources `gate.env` and runs `.venv/bin/glovebox`. Load it in `frogger`'s GUI session: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/glovebox.prod.gate.plist`. It starts at every login of `frogger`, so after a reboot the Mac mini must log `frogger` in (automatic login, or the operator).
 6. For the iMessage source (a separate ticket): sign in to Messages under `frogger` in the GUI, and grant **Full Disk Access** to the process that reads `~/Library/Messages/chat.db`. macOS ties the grant to the executable: for a Python bridge that is the real interpreter (`readlink -f ~/glovebox/.venv/bin/python`, which resolves to a Homebrew path) or a wrapper binary you grant instead. A Homebrew upgrade changes that path and silently revokes the grant, so check it after each upgrade. Grant it in System Settings, Privacy & Security, in the GUI session. This runbook does not install the bridge.
 7. Verify: `python3 scripts/env.py check --url <production MCP URL>`, with the production agent token in the variable named by `--token-env`. It must exit 0.
 8. If `check` fails, stop the deployment (`launchctl bootout gui/$(id -u)/glovebox.prod.gate`), restore the previous commit, rebuild the virtualenv (step 3) and bootstrap again, and investigate on throwaway or test.

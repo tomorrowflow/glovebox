@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import xml.etree.ElementTree as ElementTree
@@ -221,6 +222,34 @@ def test_the_production_plist_sources_a_secrets_file_and_holds_no_secret(tmp_pat
     assert "EnvironmentVariables" not in plist
     assert plist["ProgramArguments"][-2:] == ["/s/gate.env", "/r/.venv/bin/glovebox"]
     assert plist["StandardOutPath"].startswith("/h/Library/Logs/")
+
+
+def test_the_runbooks_plist_step_works_from_a_fresh_home(tmp_path: Path) -> None:
+    """Run step 5's shell block as written, with a HOME that has no Library directory yet."""
+    doc = (ROOT / "docs" / "environments.md").read_text()
+    found = re.search(r"```sh\n(\s+mkdir -p ~/Library/LaunchAgents.*?)```", doc, re.S)
+    assert found is not None
+    block = textwrap.dedent(found.group(1))
+    home = tmp_path / "frogger"
+    home.mkdir()
+    (home / "glovebox").symlink_to(ROOT)  # the runbook clones the repository to ~/glovebox
+    lines = [line for line in block.splitlines() if "plutil" not in line]  # not on Linux
+
+    result = subprocess.run(
+        ["sh", "-eu", "-c", "\n".join(lines)],
+        env={**os.environ, "HOME": str(home)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    agent = home / "Library" / "LaunchAgents" / "glovebox.prod.gate.plist"
+    plist = load_plist(agent)
+    assert plist["ProgramArguments"][-1] == f"{home}/glovebox/.venv/bin/glovebox"
+    assert Path(plist["StandardOutPath"]).parent == home / "Library" / "Logs" / "glovebox"
+    assert Path(plist["StandardOutPath"]).parent.is_dir()  # launchd does not create it
 
 
 # --- the command plan -------------------------------------------------------------------
