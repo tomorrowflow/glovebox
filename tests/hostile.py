@@ -14,7 +14,7 @@ import httpx2
 from mcp import types
 from mcp.shared.exceptions import MCPError
 
-from tests.client import READ_TOOL, agent_client
+from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, READ_TOOLS, agent_client
 from tests.conftest import RunningGate
 
 FRAGMENT_LENGTH = 12
@@ -95,7 +95,7 @@ def hostile_mail_fixture() -> dict[str, object]:
     """
     messages: list[dict[str, object]] = []
     for index, text in enumerate(CORPUS.values()):
-        received = datetime(2026, 3, 10, 8, index, 37, tzinfo=timezone(timedelta(hours=1)))
+        received = datetime(2026, 1, 8, 8, index, 37, tzinfo=timezone(timedelta(hours=1)))
         messages.append(
             {
                 "id": f"id-{text}",
@@ -128,9 +128,53 @@ def hostile_mail_fixture() -> dict[str, object]:
     return {"account": f"{CORPUS['marker']} <account@evil.test>", "messages": messages}
 
 
+FILTER_PARAMETERS = (
+    "read_status",
+    "received_from",
+    "received_to",
+    "has_attachments",
+    "sender_handle",
+    "thread_handle",
+    "account_handle",
+)
+
+# One well-formed call of each tool, with every filter unset.
+OK_CALLS: dict[str, dict[str, object]] = {
+    LIST_TOOL: {},
+    COUNT_TOOL: {},
+    GROUP_TOOL: {"group_by": "sender_handle"},
+}
+
+
+def hostile_calls() -> dict[str, tuple[str, dict[str, object]]]:
+    """Calls with one corpus string in each parameter of each tool, the rest well-formed.
+
+    Each is refused, so each is an error path of the tool that must echo nothing.
+    """
+    calls: dict[str, tuple[str, dict[str, object]]] = {}
+    for tool, base in OK_CALLS.items():
+        parameters = [*FILTER_PARAMETERS]
+        if tool != COUNT_TOOL:
+            parameters += ["limit", "cursor"]
+        parameters += {LIST_TOOL: ["sort"], GROUP_TOOL: ["group_by"], COUNT_TOOL: []}[tool]
+        for parameter in parameters:
+            for label, text in CORPUS.items():
+                calls[f"{tool} {parameter} {label}"] = (tool, {**base, parameter: text})
+    return calls
+
+
+def result_cursor(result: types.CallToolResult) -> str:
+    """The next-page cursor of a successful list or group result."""
+    structured = result.structured_content
+    assert isinstance(structured, dict)
+    cursor = structured["next_cursor"]
+    assert isinstance(cursor, str)
+    return cursor
+
+
 def expected_hostile_received() -> list[str]:
     """The minute-precision received times of the valid hostile messages, newest first."""
-    return [f"2026-03-10T07:{index:02d}Z" for index in reversed(range(len(CORPUS)))]
+    return [f"2026-01-08T07:{index:02d}Z" for index in reversed(range(len(CORPUS)))]
 
 
 async def observe_gate(gate: RunningGate) -> dict[str, str]:
@@ -147,14 +191,34 @@ async def observe_gate(gate: RunningGate) -> dict[str, str]:
         channels["capabilities"] = client.server_capabilities.model_dump_json(by_alias=True)
         channels["instructions"] = str(client.instructions)
         channels["tools"] = (await client.list_tools()).model_dump_json(by_alias=True)
-        channels["call"] = (await client.call_tool(READ_TOOL)).model_dump_json(by_alias=True)
-        bad_calls = {
-            "bad-arguments": (READ_TOOL, {"query": CORPUS["injection"]}),
-            "unknown-tool": (CORPUS["tool_call"], {}),
-        }
-        for name, (tool, arguments) in bad_calls.items():
+        for tool, arguments in OK_CALLS.items():
             result = await client.call_tool(tool, arguments)
-            channels[name] = result.model_dump_json(by_alias=True)
+            channels[f"call-{tool}"] = result.model_dump_json(by_alias=True)
+        channels["call"] = channels[f"call-{LIST_TOOL}"]
+        # Every tool, with a corpus string in every parameter it has, and with a
+        # well-formed but foreign cursor: each is a refusal that must echo nothing.
+        for name, (tool, arguments) in hostile_calls().items():
+            result = await client.call_tool(tool, arguments)
+            channels[f"refused {name}"] = result.model_dump_json(by_alias=True)
+        page = await client.call_tool(LIST_TOOL, {"limit": 1})
+        channels["page"] = page.model_dump_json(by_alias=True)
+        cursor = result_cursor(page)
+        foreign_cursor_calls: list[tuple[str, dict[str, object]]] = [
+            (LIST_TOOL, {"limit": 1, "sort": "received_asc", "cursor": cursor}),
+            (LIST_TOOL, {"limit": 1, "read_status": "unread", "cursor": cursor}),
+            (GROUP_TOOL, {"group_by": "sender_handle", "cursor": cursor}),
+        ]
+        for tool, arguments in foreign_cursor_calls:
+            result = await client.call_tool(tool, arguments)
+            channels[f"foreign cursor {tool} {sorted(arguments)}"] = result.model_dump_json(
+                by_alias=True
+            )
+        for tool in READ_TOOLS:
+            result = await client.call_tool(tool, {"query": CORPUS["injection"]})
+            channels[f"bad-arguments-{tool}"] = result.model_dump_json(by_alias=True)
+        channels["bad-arguments"] = channels[f"bad-arguments-{LIST_TOOL}"]
+        result = await client.call_tool(CORPUS["tool_call"], {})
+        channels["unknown-tool"] = result.model_dump_json(by_alias=True)
         for name, method in (
             ("resources", client.list_resources),
             ("prompts", client.list_prompts),
@@ -166,7 +230,7 @@ async def observe_gate(gate: RunningGate) -> dict[str, str]:
     async with httpx2.AsyncClient(timeout=30) as http:
         refused = await http.post(
             gate.url,
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": READ_TOOL}},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": LIST_TOOL}},
             headers={"Accept": "application/json, text/event-stream"},
         )
         channels["refusal"] = f"{refused.status_code} {dict(refused.headers)} {refused.text}"

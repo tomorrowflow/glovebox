@@ -9,7 +9,10 @@ from mcp.client.streamable_http import streamable_http_client
 
 from tests.conftest import RunningGate
 
-READ_TOOL = "list_recent_mail"
+LIST_TOOL = "list_items"
+COUNT_TOOL = "count_items"
+GROUP_TOOL = "group_items"
+READ_TOOLS = [LIST_TOOL, COUNT_TOOL, GROUP_TOOL]
 
 
 @asynccontextmanager

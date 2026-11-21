@@ -46,7 +46,7 @@ def _walk(root: dict[str, Any], node: Any, path: str, problems: list[str]) -> No
         if "maxItems" not in node:
             problems.append(f"{path}: array has no maxItems")
         _walk(root, node.get("items"), f"{path}/[]", problems)
-    elif kind == "boolean":
+    elif kind in ("boolean", "null"):
         pass
     elif kind in ("integer", "number"):
         if "minimum" not in node or "maximum" not in node:
