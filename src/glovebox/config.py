@@ -22,6 +22,12 @@ class Settings:
     db_path: Path
     mail_url: str | None
     mail_fixture: Path | None
+    # The operator's topic list, deadline range and inference settings; read by the service
+    # at startup. Unset means no classifier is configured.
+    classifier_config: Path | None = None
+    # Test-only controls of the stub classifier: its script, and a record of its calls.
+    stub_script: Path | None = None
+    stub_probe: Path | None = None
     # Pins the clock the 30-day window is measured from. For tests and fixture stacks only:
     # real time is used when this is unset.
     fixed_now: datetime | None = None
@@ -51,8 +57,15 @@ class Settings:
             db_path=Path(env.get("GLOVEBOX_DB") or DEFAULT_DB),
             mail_url=mail_url,
             mail_fixture=Path(mail_fixture) if mail_fixture else None,
+            classifier_config=_path(env.get("GLOVEBOX_CLASSIFIER_CONFIG")),
+            stub_script=_path(env.get("GLOVEBOX_STUB_CLASSIFIER_SCRIPT")),
+            stub_probe=_path(env.get("GLOVEBOX_STUB_CLASSIFIER_PROBE")),
             fixed_now=parse_fixed_now(env.get("GLOVEBOX_FIXED_NOW")),
         )
+
+
+def _path(value: str | None) -> Path | None:
+    return Path(value) if value else None
 
 
 def parse_fixed_now(value: str | None) -> datetime | None:

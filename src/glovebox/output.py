@@ -13,8 +13,17 @@ from typing import Literal
 from mcp import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from glovebox.fields import Count, Cursor, Handle, Minute
-from glovebox.formats import MAX_ITEMS
+from glovebox.fields import (
+    ClassificationStatus,
+    Count,
+    Cursor,
+    Deadline,
+    Handle,
+    Minute,
+    TopicId,
+    YesNoUnknown,
+)
+from glovebox.formats import MAX_ITEMS, MAX_TOPICS
 from glovebox.sources import ReadStatus, SourceKind
 
 ErrorCode = Literal[
@@ -27,8 +36,11 @@ ErrorCode = Literal[
     "internal_error",
 ]
 
-# What a group is keyed by: a handle, or a value of one of the enum fields.
-GroupKey = Handle | ReadStatus | SourceKind
+# What a group is keyed by: a handle, a value of one of the enum fields, a topic ID or a
+# deadline.
+GroupKey = (
+    Handle | ReadStatus | SourceKind | TopicId | YesNoUnknown | ClassificationStatus | Deadline
+)
 
 
 class Output(BaseModel):
@@ -48,6 +60,17 @@ class MailItem(BaseModel):
     received: Minute
     read_status: ReadStatus
     has_attachments: bool
+    # Semantic fields: judgments of the quarantined classifier, untrusted, never an
+    # authorization for an action.
+    topic: TopicId
+    reply_needed: YesNoUnknown
+    action_requested: YesNoUnknown
+    deadline: Deadline
+    classification_status: ClassificationStatus
+
+
+class TopicsOutput(Output):
+    topics: list[TopicId] = Field(default=[], max_length=MAX_TOPICS)
 
 
 class ListOutput(Output):

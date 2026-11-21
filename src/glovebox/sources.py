@@ -3,7 +3,9 @@
 An adapter fetches one account's mail and hands the gate normalized records. A
 record holds the upstream keys the handle registry needs and the few values that
 become permitted fields; subjects, bodies, names, recipients, filenames and every
-other upstream value are never read out of the document (ADR 0004).
+other upstream value are never read out of the document (ADR 0004). The one exception is
+an item's text, its subject and body: it is read so that the quarantined classifier can
+judge it, held in memory for that, and never stored, logged or served.
 """
 
 import http.client
@@ -11,7 +13,7 @@ import json
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from pathlib import Path
@@ -22,6 +24,7 @@ SourceKind = Literal["fixture_mail"]
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 10
+MAX_TEXT_CHARS = 16_000  # what the classifier is shown of one item; the rest is cut off
 
 
 class SourceError(Exception):
@@ -39,6 +42,9 @@ class SourceItem:
     received: datetime  # UTC, truncated to the minute
     read_status: ReadStatus
     has_attachments: bool
+    # The subject and body, for the classifier only. Kept out of repr so that an item that
+    # ends up in a log line or a traceback does not carry it.
+    text: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -129,7 +135,16 @@ def parse_message(message: object) -> SourceItem | None:
         received=received,
         read_status=read_status_of(read),
         has_attachments=isinstance(attachments, list) and len(attachments) > 0,
+        text=text_of(message),
     )
+
+
+def text_of(message: Mapping[str, object]) -> str:
+    """The subject and body, those of them that are strings, cut to the classifier's limit."""
+    parts = [
+        part for part in (message.get("subject"), message.get("body")) if isinstance(part, str)
+    ]
+    return "\n\n".join(parts)[:MAX_TEXT_CHARS]
 
 
 def read_status_of(read: object) -> ReadStatus:

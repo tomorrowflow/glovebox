@@ -1,18 +1,18 @@
 {
   "type": "architecture",
   "title": "src/glovebox",
-  "subtitle": "The gate: bearer token, three read tools (list, count, group), fixture mail source, SQLite store and the output validator",
+  "subtitle": "The gate: bearer token, four read tools (list, count, group, topic IDs), fixture mail source, SQLite store and the output validator",
   "dir": "LR",
   "motion": "trace",
   "nodes": [
     {"id": "client", "label": "MCP client", "sub": "agent", "kind": "optional", "row": 0, "col": 0},
     {"id": "uvicorn", "label": "uvicorn", "sub": "ASGI server", "kind": "external", "row": 0, "col": 1},
     {"id": "auth", "label": "Bearer token", "sub": "auth.py, 401 before dispatch", "row": 0, "col": 2},
-    {"id": "mcp", "label": "MCP Server", "sub": "server.py, three tools", "row": 0, "col": 3},
-    {"id": "tool", "label": "ReadTool", "sub": "list_items, count_items, group_items", "focal": true, "row": 0, "col": 4},
+    {"id": "mcp", "label": "MCP Server", "sub": "server.py, four tools", "row": 0, "col": 3},
+    {"id": "tool", "label": "ReadTool", "sub": "list, count, group items; list topics", "focal": true, "row": 0, "col": 4},
     {"id": "main", "label": "main()", "sub": "__main__.py", "row": 1, "col": 1},
     {"id": "source", "label": "Fixture mail source", "sub": "sources.py, file or stand-in", "kind": "external", "row": 1, "col": 3},
-    {"id": "store", "label": "SQLite store", "sub": "handles, items, sync state", "row": 1, "col": 4},
+    {"id": "store", "label": "SQLite store", "sub": "handles, items, classifications, sync state", "row": 1, "col": 4},
     {"id": "validator", "label": "Output validator", "sub": "output.py release()", "row": 2, "col": 4}
   ],
   "edges": [
@@ -26,22 +26,22 @@
     {"from": "main", "to": "uvicorn", "label": "uvicorn.run"}
   ],
   "evidence": [
-    {"id": "client", "file": "tests/client.py", "line": 21, "note": "Only the acceptance tests' MCP client connects today; inferred as the agent."},
+    {"id": "client", "file": "tests/client.py", "line": 20, "note": "Only the acceptance tests' MCP client connects today; inferred as the agent."},
     {"id": "uvicorn", "file": "src/glovebox/__main__.py", "line": 22, "note": "uvicorn.run serves the app."},
     {"id": "auth", "file": "src/glovebox/auth.py", "line": 25, "note": "Outermost middleware; compares the bearer token before anything else runs and records the caller's identity that page cursors are bound to."},
-    {"id": "mcp", "file": "src/glovebox/server.py", "line": 38, "note": "Low-level Server with only tools/list and tools/call handlers: no resources or prompts."},
-    {"id": "tool", "file": "src/glovebox/tool.py", "line": 120, "note": "Validates the call's inputs, checks the cursor, then answers from the store; the sort orders, filters and the 1000+ cap live in store.py."},
+    {"id": "mcp", "file": "src/glovebox/server.py", "line": 48, "note": "Low-level Server with only tools/list and tools/call handlers: no resources or prompts."},
+    {"id": "tool", "file": "src/glovebox/tool.py", "line": 142, "note": "Validates the call's inputs, checks the cursor, classifies the items that need it (see classifier.json), then answers from the store; the sort orders, filters and the 1000+ cap live in store.py."},
     {"id": "main", "file": "src/glovebox/__main__.py", "line": 15, "note": "Reads GLOVEBOX_HOST and GLOVEBOX_PORT, builds the app from the environment."},
-    {"id": "source", "file": "src/glovebox/sources.py", "line": 58, "note": "The only code that sees raw upstream structure; reads no text field."},
-    {"id": "store", "file": "src/glovebox/store.py", "line": 91, "note": "Permitted fields, keyed-digest handle mappings and sync state; no raw text. Mail outside the 30-day window is not stored."},
-    {"id": "validator", "file": "src/glovebox/output.py", "line": 90, "note": "Checks the whole result; a failure becomes the fixed response_invalid error."},
-    {"id": "client>uvicorn", "file": "tests/client.py", "line": 25},
-    {"id": "uvicorn>auth", "file": "src/glovebox/server.py", "line": 61, "note": "add_middleware makes the token check the outermost layer of the app."},
+    {"id": "source", "file": "src/glovebox/sources.py", "line": 64, "note": "The only code that sees raw upstream structure; reads an item's subject and body only for the classifier, never to store or serve."},
+    {"id": "store", "file": "src/glovebox/store.py", "line": 125, "note": "Permitted fields, semantic fields, keyed-digest handle and content mappings and sync state; no raw text. Mail outside the 30-day window is not stored."},
+    {"id": "validator", "file": "src/glovebox/output.py", "line": 113, "note": "Checks the whole result; a failure becomes the fixed response_invalid error."},
+    {"id": "client>uvicorn", "file": "tests/client.py", "line": 26},
+    {"id": "uvicorn>auth", "file": "src/glovebox/server.py", "line": 78, "note": "add_middleware makes the token check the outermost layer of the app."},
     {"id": "auth>mcp", "file": "src/glovebox/auth.py", "line": 38},
-    {"id": "mcp>tool", "file": "src/glovebox/server.py", "line": 47},
-    {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 178},
-    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 183},
-    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 142},
+    {"id": "mcp>tool", "file": "src/glovebox/server.py", "line": 57},
+    {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 208},
+    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 215},
+    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 170},
     {"id": "main>uvicorn", "file": "src/glovebox/__main__.py", "line": 22}
   ]
 }

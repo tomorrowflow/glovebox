@@ -3,7 +3,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +21,8 @@ class RunningGate:
     url: str
     token: str
     db: Path
+    # Everything the service wrote to stdout and stderr, for the "nothing in logs" checks.
+    log: Path
 
 
 @pytest.fixture
@@ -51,6 +53,7 @@ def run_gate(
     mail_url: str | None = None,
     token: str = AGENT_TOKEN,
     now: str = NOW,
+    env_extra: Mapping[str, str] | None = None,
 ) -> Iterator[RunningGate]:
     """Run the service through its entry point on a free loopback port.
 
@@ -70,14 +73,19 @@ def run_gate(
         env["GLOVEBOX_MAIL_FIXTURE"] = str(mail_fixture)
     if mail_url is not None:
         env["GLOVEBOX_STANDIN_MAILBOX_MAIL"] = mail_url
-    process = subprocess.Popen([sys.executable, "-m", "glovebox"], env=env)
+    env.update(env_extra or {})
+    log = db.parent / f"{db.name}.log"
+    with log.open("ab") as log_file:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "glovebox"], env=env, stdout=log_file, stderr=log_file
+        )
     try:
         deadline = time.monotonic() + 15
         while not _accepts_connections(port):
             if process.poll() is not None or time.monotonic() > deadline:
                 raise RuntimeError("the service did not start")
             time.sleep(0.05)
-        yield RunningGate(url=f"http://127.0.0.1:{port}/mcp", token=token, db=db)
+        yield RunningGate(url=f"http://127.0.0.1:{port}/mcp", token=token, db=db, log=log)
     finally:
         process.terminate()
         process.wait(timeout=10)
@@ -100,9 +108,15 @@ def start_gate(tmp_path: Path) -> GateStarter:
         mail_url: str | None = None,
         token: str = AGENT_TOKEN,
         now: str = NOW,
+        env_extra: Mapping[str, str] | None = None,
     ) -> AbstractContextManager[RunningGate]:
         return run_gate(
-            tmp_path / db, mail_fixture=mail_fixture, mail_url=mail_url, token=token, now=now
+            tmp_path / db,
+            mail_fixture=mail_fixture,
+            mail_url=mail_url,
+            token=token,
+            now=now,
+            env_extra=env_extra,
         )
 
     return start

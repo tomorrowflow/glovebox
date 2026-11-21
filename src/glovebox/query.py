@@ -19,12 +19,22 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from glovebox.fields import Cursor, Handle, Minute
+from glovebox.fields import ClassificationStatus, Cursor, Handle, Minute, TopicId, YesNoUnknown
 from glovebox.formats import CURSOR_LENGTH, MAX_ITEMS
 from glovebox.sources import ReadStatus
 
 SortOrder = Literal["received_desc", "received_asc", "unread_first", "attachments_first"]
-GroupBy = Literal["sender_handle", "thread_handle", "read_status", "source_kind"]
+GroupBy = Literal[
+    "sender_handle",
+    "thread_handle",
+    "read_status",
+    "source_kind",
+    "topic",
+    "reply_needed",
+    "action_requested",
+    "deadline",
+    "classification_status",
+]
 
 OFFSET_BYTES = 4
 MAC_BYTES = 16
@@ -42,6 +52,14 @@ class Filters(BaseModel):
     sender_handle: Handle | None = None
     thread_handle: Handle | None = None
     account_handle: Handle | None = None
+    # The semantic fields. A topic ID that is not configured matches nothing; a deadline
+    # range matches only items whose deadline is known.
+    topic: TopicId | None = None
+    reply_needed: YesNoUnknown | None = None
+    action_requested: YesNoUnknown | None = None
+    deadline_from: Minute | None = None
+    deadline_to: Minute | None = None
+    classification_status: ClassificationStatus | None = None
 
     def only_filters(self) -> "Filters":
         """These filters alone, without the sort, page size or cursor of a subclass."""
@@ -56,6 +74,12 @@ class ListInput(Filters):
 
 class CountInput(Filters):
     pass
+
+
+class TopicsInput(BaseModel):
+    """`list_topics` takes no arguments."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class GroupInput(Filters):

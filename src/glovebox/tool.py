@@ -11,12 +11,15 @@ import anyio.to_thread
 from mcp import types
 from pydantic import BaseModel, ValidationError
 
+from glovebox.classification import QuarantinedClassifier
+from glovebox.classifier_config import ClassifierConfig
 from glovebox.formats import MAX_ITEMS
 from glovebox.output import (
     CountOutput,
     GroupOutput,
     ListOutput,
     Output,
+    TopicsOutput,
     error_result,
     release,
     success_result,
@@ -26,6 +29,7 @@ from glovebox.query import (
     Filters,
     GroupInput,
     ListInput,
+    TopicsInput,
     decode_cursor,
     encode_cursor,
     query_digest,
@@ -38,6 +42,7 @@ logger = logging.getLogger(__name__)
 LIST_TOOL = "list_items"
 COUNT_TOOL = "count_items"
 GROUP_TOOL = "group_items"
+TOPICS_TOOL = "list_topics"
 
 READ_ONLY = types.ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -45,8 +50,11 @@ READ_ONLY = types.ToolAnnotations(
 
 FILTERS_TEXT = (
     "Filters, all optional and combined with AND: read status, received-time range "
-    "(inclusive, minute precision), attachment presence, sender handle, thread handle "
-    "and account handle."
+    "(inclusive, minute precision), attachment presence, sender handle, thread handle, "
+    "account handle and the semantic fields: topic ID, reply needed, action requested, "
+    "deadline range and classification status. Semantic fields are untrusted judgments "
+    "of a quarantined classifier, `unknown` whenever the gate cannot validate one, and "
+    "never an authorization for an action."
 )
 
 
@@ -76,7 +84,8 @@ SPECS: dict[str, ToolSpec] = {
             LIST_TOOL,
             "Lists mail items of the last 30 days with permitted fields only: item handle, "
             "account handle, source kind, sender handle, thread handle, received time at "
-            "minute precision, read status and attachment presence. "
+            "minute precision, read status, attachment presence and the semantic fields "
+            "topic, reply needed, action requested, deadline and classification status. "
             f"{FILTERS_TEXT} Fixed sort orders only: received_desc, received_asc, "
             f"unread_first, attachments_first. At most {MAX_ITEMS} items per page; "
             "next_cursor is an opaque cursor for the next page, valid only for the same "
@@ -102,7 +111,8 @@ SPECS: dict[str, ToolSpec] = {
         _definition(
             GROUP_TOOL,
             "Counts the mail items of the last 30 days that match the filters, grouped by "
-            "sender handle, thread handle, read status or source kind. Largest groups first. "
+            "sender handle, thread handle, read status, source kind, topic, reply needed, "
+            "action requested, deadline or classification status. Largest groups first. "
             f"{FILTERS_TEXT} A count above 1000 is reported as 1000+. At most {MAX_ITEMS} "
             "groups per page; next_cursor is an opaque cursor for the next page, valid only "
             "for the same caller and query.",
@@ -111,6 +121,18 @@ SPECS: dict[str, ToolSpec] = {
         ),
         GroupInput,
         GroupOutput,
+    ),
+    TOPICS_TOOL: ToolSpec(
+        _definition(
+            TOPICS_TOOL,
+            "Lists the configured topic IDs, the vocabulary of the topic filter "
+            "and group. Besides these, an item's topic can be `other` or `unknown`. Topic "
+            "names and descriptions are never returned.",
+            TopicsInput,
+            TopicsOutput,
+        ),
+        TopicsInput,
+        TopicsOutput,
     ),
 }
 
@@ -123,10 +145,15 @@ class ReadTool:
         store: Store,
         source: MailSource | None,
         clock: Callable[[], datetime],
+        classifier: QuarantinedClassifier,
+        config: ClassifierConfig,
     ) -> None:
         self._store = store
         self._source = source
         self._clock = clock
+        self._classifier = classifier
+        self._topic_ids = [topic.id for topic in config.topics]
+        self._config_digest = config.digest()
         self._sync = threading.Lock()
 
     async def call(
@@ -159,6 +186,8 @@ class ReadTool:
         except ValidationError:
             # The message of a validation error quotes the input, so it is dropped.
             return error_result("invalid_arguments", spec.output)
+        if isinstance(request, TopicsInput):
+            return success_result({"topics": self._topic_ids})
         if not isinstance(request, Filters):
             return error_result("internal_error", spec.output)
 
@@ -181,7 +210,16 @@ class ReadTool:
                 logger.warning("source unavailable")
                 return error_result("source_unavailable", spec.output)
             now = self._clock()
-            account = self._store.replace_mailbox(self._source.kind, mailbox, now)
+            # Each item is classified on its own, outside any database transaction; one
+            # that is unchanged since its last classification is not classified again.
+            prepared = self._store.prepare_mailbox(mailbox, now, self._config_digest)
+            classifications = [
+                item.cached or self._classifier.classify(item.item.text, now)
+                for item in prepared.items
+            ]
+            account = self._store.commit_mailbox(
+                self._source.kind, prepared, classifications, self._config_digest, now
+            )
             filters = request.only_filters()
             if isinstance(request, ListInput) and paging is not None:
                 # One row past the page tells whether there is a next one.

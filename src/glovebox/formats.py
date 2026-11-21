@@ -1,6 +1,8 @@
 """The shapes of the values that cross the gate, shared by the store that mints them and
 the output validator that checks them."""
 
+from datetime import datetime
+
 HANDLE_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"  # a-z and 2-7
 HANDLE_LENGTH = 24
 HANDLE_PATTERN = rf"^[a-z2-7]{{{HANDLE_LENGTH}}}$"
@@ -9,6 +11,20 @@ MINUTE_FORMAT = "%Y-%m-%dT%H:%MZ"
 # [0-9], not \d: the validator's regex engine takes \d to match digits of any script.
 MINUTE_PATTERN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z$"
 MINUTE_LENGTH = 17
+
+
+def minute(moment: datetime) -> str:
+    return moment.strftime(MINUTE_FORMAT)
+
+
+# An operator-chosen topic ID. `other` and `unknown` fit it too: they are reserved, so no
+# configured topic can take them, but an item can carry them.
+TOPIC_ID_PATTERN = r"^[a-z][a-z0-9_]{0,23}$"
+TOPIC_ID_MAX_LENGTH = 24
+TOPIC_OTHER = "other"
+TOPIC_UNKNOWN = "unknown"
+RESERVED_TOPICS = (TOPIC_OTHER, TOPIC_UNKNOWN)
+MAX_TOPICS = 32
 
 # Limits that bound side channels (ADR 0001).
 WINDOW_DAYS = 30  # mail is neither ingested nor served beyond this

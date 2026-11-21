@@ -14,7 +14,7 @@ import httpx2
 from mcp import types
 from mcp.shared.exceptions import MCPError
 
-from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, READ_TOOLS, agent_client
+from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, READ_TOOLS, TOPICS_TOOL, agent_client
 from tests.conftest import RunningGate
 
 FRAGMENT_LENGTH = 12
@@ -136,6 +136,12 @@ FILTER_PARAMETERS = (
     "sender_handle",
     "thread_handle",
     "account_handle",
+    "topic",
+    "reply_needed",
+    "action_requested",
+    "deadline_from",
+    "deadline_to",
+    "classification_status",
 )
 
 # One well-formed call of each tool, with every filter unset.
@@ -143,6 +149,7 @@ OK_CALLS: dict[str, dict[str, object]] = {
     LIST_TOOL: {},
     COUNT_TOOL: {},
     GROUP_TOOL: {"group_by": "sender_handle"},
+    TOPICS_TOOL: {},
 }
 
 
@@ -153,10 +160,14 @@ def hostile_calls() -> dict[str, tuple[str, dict[str, object]]]:
     """
     calls: dict[str, tuple[str, dict[str, object]]] = {}
     for tool, base in OK_CALLS.items():
-        parameters = [*FILTER_PARAMETERS]
-        if tool != COUNT_TOOL:
-            parameters += ["limit", "cursor"]
-        parameters += {LIST_TOOL: ["sort"], GROUP_TOOL: ["group_by"], COUNT_TOOL: []}[tool]
+        if tool == TOPICS_TOOL:
+            # It takes no arguments, so each filter name is an argument it refuses.
+            parameters = [*FILTER_PARAMETERS, "query"]
+        else:
+            parameters = [*FILTER_PARAMETERS]
+            if tool != COUNT_TOOL:
+                parameters += ["limit", "cursor"]
+            parameters += {LIST_TOOL: ["sort"], GROUP_TOOL: ["group_by"], COUNT_TOOL: []}[tool]
         for parameter in parameters:
             for label, text in CORPUS.items():
                 calls[f"{tool} {parameter} {label}"] = (tool, {**base, parameter: text})

@@ -5,7 +5,7 @@
   "motion": "reveal",
   "nodes": [
     {"id": "agent", "label": "AI agent", "sub": "MCP client with a bearer token", "kind": "optional", "row": 0, "col": 0},
-    {"id": "glovebox", "label": "Glovebox", "sub": "list, count, group; text never crosses", "focal": true, "row": 0, "col": 1},
+    {"id": "glovebox", "label": "Glovebox", "sub": "typed fields, validated judgments; no text", "focal": true, "row": 0, "col": 1},
     {"id": "mail", "label": "Fixture mail", "sub": "fictional stand-in, no real account", "kind": "external", "row": 0, "col": 2}
   ],
   "edges": [
@@ -13,10 +13,10 @@
     {"from": "glovebox", "to": "mail", "label": "reads, keeps no text"}
   ],
   "evidence": [
-    {"id": "agent", "file": "tests/client.py", "line": 21, "note": "Only an MCP client in the acceptance tests connects today; no real agent integration is in the code, so this node is inferred."},
-    {"id": "glovebox", "file": "src/glovebox/tool.py", "line": 120, "note": "The read tools list_items, count_items and group_items return permitted fields only."},
-    {"id": "mail", "file": "src/glovebox/sources.py", "line": 58, "note": "Fixture source: a file or the mailbox.org mail stand-in."},
+    {"id": "agent", "file": "tests/client.py", "line": 20, "note": "Only an MCP client in the acceptance tests connects today; no real agent integration is in the code, so this node is inferred."},
+    {"id": "glovebox", "file": "src/glovebox/tool.py", "line": 142, "note": "The read tools list_items, count_items, group_items and list_topics return permitted fields only, including four semantic fields a quarantined classifier proposes and the gate validates."},
+    {"id": "mail", "file": "src/glovebox/sources.py", "line": 64, "note": "Fixture source: a file or the mailbox.org mail stand-in."},
     {"id": "agent>glovebox", "file": "src/glovebox/auth.py", "line": 25, "note": "The client reaches the service at /mcp over Streamable HTTP with a bearer token."},
-    {"id": "glovebox>mail", "file": "src/glovebox/tool.py", "line": 178}
+    {"id": "glovebox>mail", "file": "src/glovebox/tool.py", "line": 208}
   ]
 }

@@ -24,7 +24,14 @@ import pytest
 from mcp import Client, types
 from mcp.shared.exceptions import MCPError
 
-from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, READ_TOOLS, agent_client
+from tests.client import (
+    COUNT_TOOL,
+    GROUP_TOOL,
+    LIST_TOOL,
+    READ_TOOLS,
+    TOPICS_TOOL,
+    agent_client,
+)
 from tests.conftest import AGENT_TOKEN, GateStarter, RunningGate
 from tests.hostile import (
     CORPUS,
@@ -50,6 +57,11 @@ ITEM_FIELDS = {
     "received",
     "read_status",
     "has_attachments",
+    "topic",
+    "reply_needed",
+    "action_requested",
+    "deadline",
+    "classification_status",
 }
 
 
@@ -340,8 +352,11 @@ async def test_a_source_that_cannot_be_read_is_a_fixed_error_not_an_empty_inbox(
     for gate_options in ({}, {"mail_fixture": missing}, {"mail_fixture": broken}):
         with start_gate(**gate_options) as gate:
             async with agent_client(gate) as client:
+                # The topic IDs are configuration, not mail, so that tool needs no source.
                 results = {
-                    tool: await client.call_tool(tool, OK_CALLS[tool]) for tool in READ_TOOLS
+                    tool: await client.call_tool(tool, OK_CALLS[tool])
+                    for tool in READ_TOOLS
+                    if tool != TOPICS_TOOL
                 }
             for result in results.values():
                 assert result.is_error is True
