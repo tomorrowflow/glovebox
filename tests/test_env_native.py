@@ -224,8 +224,30 @@ def test_the_production_plist_sources_a_secrets_file_and_holds_no_secret(tmp_pat
     assert plist["StandardOutPath"].startswith("/h/Library/Logs/")
 
 
+def runbook_position(runbook: str, text: str) -> int:
+    position = runbook.find(text)
+    assert position >= 0, text
+    return position
+
+
+def test_the_runbook_stops_a_loaded_gate_before_it_changes_anything_and_before_bootstrapping() -> (
+    None
+):
+    doc = (ROOT / "docs" / "environments.md").read_text()
+    runbook = doc[doc.index("## Production runbook") :]
+    stop = runbook_position(runbook, "launchctl bootout gui/$(id -u)/glovebox.prod.gate")
+
+    # A second deployment finds the first one loaded: `bootstrap` would fail or leave it running.
+    assert stop < runbook_position(runbook, "git -C ~/glovebox checkout")
+    assert stop < runbook_position(runbook, ".venv/bin/pip install")
+    assert stop < runbook_position(runbook, "> ~/Library/LaunchAgents/")
+    assert stop < runbook_position(runbook, "launchctl bootstrap gui/$(id -u)")
+    assert "|| true" in runbook[stop : stop + 120]  # the first deployment has nothing to stop
+    assert stop < runbook_position(runbook, "scripts/env.py check --url")
+
+
 def test_the_runbooks_plist_step_works_from_a_fresh_home(tmp_path: Path) -> None:
-    """Run step 5's shell block as written, with a HOME that has no Library directory yet."""
+    """Run the plist step's shell block as written, with a HOME that has no Library directory."""
     doc = (ROOT / "docs" / "environments.md").read_text()
     found = re.search(r"```sh\n(\s+mkdir -p ~/Library/LaunchAgents.*?)```", doc, re.S)
     assert found is not None
