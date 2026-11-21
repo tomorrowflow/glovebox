@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The refresh timer of the test tier (ADR 0007), the macOS counterpart of
+  glovebox-test-env.timer: a system LaunchDaemon that runs as glovebox-test and
+  runs `env.py ensure-test` at load and then every 5 minutes. ensure-test takes
+  a lock, so a run that overlaps another exits without effect. It fetches over
+  git without a prompt and never calls launchctl. Needs no GUI login.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>glovebox.test.ensure-test</string>
+  <key>UserName</key>
+  <string>@USER@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PYTHON@</string>
+    <string>@REPO@/scripts/env.py</string>
+    <string>ensure-test</string>
+    <string>--tier</string>
+    <string>test</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@REPO@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>GLOVEBOX_ENV_TIER</key>
+    <string>test</string>
+    <key>GIT_TERMINAL_PROMPT</key>
+    <string>0</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>StandardOutPath</key>
+  <string>@LOGS@/ensure-test.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOGS@/ensure-test.log</string>
+</dict>
+</plist>

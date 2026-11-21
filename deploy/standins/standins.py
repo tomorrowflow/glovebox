@@ -81,7 +81,9 @@ def make_server(service: str, state: Path, host: str, port: int) -> ThreadingHTT
 
 def main() -> None:
     state = Path(os.environ.get("STANDINS_STATE", "/state/seed"))
-    servers = [make_server(name, state, "0.0.0.0", port) for name, port in SERVICES.items()]
+    # All interfaces inside the container; the native test tier sets loopback.
+    host = os.environ.get("STANDINS_HOST", "0.0.0.0")
+    servers = [make_server(name, state, host, port) for name, port in SERVICES.items()]
     threads = [threading.Thread(target=server.serve_forever) for server in servers]
     for thread in threads:
         thread.start()
