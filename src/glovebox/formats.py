@@ -13,6 +13,7 @@ MINUTE_LENGTH = 17
 # Limits that bound side channels (ADR 0001).
 WINDOW_DAYS = 30  # mail is neither ingested nor served beyond this
 MAX_ITEMS = 50  # items or groups in one response
+MAX_ACCOUNTS = 50  # accounts one token covers, so one response lists them all
 COUNT_CAP = 1000  # a count above this is reported as COUNT_CAPPED
 
 COUNT_CAPPED = f"{COUNT_CAP}+"

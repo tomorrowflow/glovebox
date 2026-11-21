@@ -14,7 +14,7 @@ from mcp import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from glovebox.fields import Count, Cursor, Handle, Minute
-from glovebox.formats import MAX_ITEMS
+from glovebox.formats import MAX_ACCOUNTS, MAX_ITEMS
 from glovebox.sources import ReadStatus, SourceKind
 
 ErrorCode = Literal[
@@ -48,6 +48,17 @@ class MailItem(BaseModel):
     received: Minute
     read_status: ReadStatus
     has_attachments: bool
+
+
+class AccountEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    account_handle: Handle
+    source_kind: SourceKind
+
+
+class AccountsOutput(Output):
+    accounts: list[AccountEntry] = Field(default=[], max_length=MAX_ACCOUNTS)
 
 
 class ListOutput(Output):

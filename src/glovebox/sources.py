@@ -15,10 +15,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, get_args
+from urllib.parse import urlsplit
+
+from glovebox.credentials import read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
 SourceKind = Literal["fixture_mail"]
+SOURCE_KINDS: tuple[str, ...] = get_args(SourceKind)
+# Kinds whose account must name a credentials file. The fixture kind talks to a
+# stand-in that asks for none.
+CREDENTIALS_REQUIRED: frozenset[str] = frozenset()
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 10
@@ -159,3 +166,18 @@ def parse_received(value: object) -> datetime | None:
         return parsed.astimezone(UTC).replace(second=0, microsecond=0)
     except (ValueError, OverflowError):
         return None
+
+
+def open_source(kind: str, location: str, credentials: Path | None) -> MailSource:
+    """The adapter for one account, once its credentials file has passed the mode check.
+
+    Raises CredentialsError, which carries no detail, if the file cannot be used.
+    """
+    if credentials is not None:
+        # The fixture kind uses no credentials; its file is checked all the same, so the
+        # refusal is the same for every kind.
+        read_credentials(credentials)
+    if kind == "fixture_mail":
+        is_url = urlsplit(location).scheme in ("http", "https")
+        return FixtureMailSource(location if is_url else Path(location))
+    raise SourceError

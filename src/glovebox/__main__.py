@@ -1,25 +1,19 @@
-"""Service entry point: `glovebox` or `python -m glovebox`."""
+"""Entry point: `glovebox` or `python -m glovebox`.
+
+With no command it runs the service; `account` and `token` are the operator's commands.
+"""
 
 import os
 import sys
 
-import uvicorn
-
-from glovebox.config import ConfigError
-from glovebox.server import create_app
-
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8765
+from glovebox.cli import run, serve
 
 
 def main() -> None:
-    host = os.environ.get("GLOVEBOX_HOST", DEFAULT_HOST)
-    port = int(os.environ.get("GLOVEBOX_PORT", DEFAULT_PORT))
-    try:
-        app = create_app()
-    except ConfigError as error:
-        sys.exit(f"glovebox: {error}")
-    uvicorn.run(app, host=host, port=port)
+    argv = sys.argv[1:]
+    if argv[:1] in ([], ["serve"]):
+        sys.exit(serve(argv or ["serve"], os.environ))
+    sys.exit(run(argv, os.environ, sys.stdout, sys.stderr))
 
 
 if __name__ == "__main__":
