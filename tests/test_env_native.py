@@ -737,6 +737,65 @@ def test_serve_waits_before_restarting_a_service_that_keeps_dying(
     run_serve(env, script)
 
 
+def test_the_running_release_is_empty_when_the_pid_file_goes_away_while_it_is_read(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `serve` removes the old pid file during a restart, between our two looks at it.
+    (tmp_path / "run").mkdir()
+    path = env.pid_file("gate")
+    path.write_text(f"{os.getpid()} up one\n")
+    real_alive = env.pid_alive
+
+    def alive_then_gone(candidate: Path) -> bool:
+        alive: bool = real_alive(candidate)
+        candidate.unlink()
+        return alive
+
+    monkeypatch.setattr(env, "pid_alive", alive_then_gone)
+
+    assert env.running_release("gate") == ""
+
+
+def test_up_waits_through_a_restart_that_removes_the_pid_file(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "run").mkdir()
+    monkeypatch.setattr(env, "install_dependencies", lambda: True)
+    monkeypatch.setattr(env, "native_seed", lambda: True)
+    monkeypatch.setattr(env, "native_status", lambda: ("ok", "ok"))
+    monkeypatch.setattr(env, "release_fingerprint", lambda: "new")
+    monkeypatch.setattr(env.time, "sleep", lambda seconds: None)
+    looks = {"count": 0}
+
+    def old_then_gone_then_new(service: str) -> str:
+        looks["count"] += 1
+        return ("up old", "", "up new")[min(looks["count"] // 2, 2)]
+
+    monkeypatch.setattr(env, "running_release", old_then_gone_then_new)
+
+    assert env.main(["up"]) == 0
+
+
+def test_serve_writes_the_pid_file_whole_or_not_at_all(serving: ModuleType, tmp_path: Path) -> None:
+    env = serving
+    reads: list[str] = []
+
+    def script() -> None:
+        env.write_desired("up one")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                reads.append(env.pid_file("gate").read_text())
+            except FileNotFoundError:
+                pass
+
+    run_serve(env, script)
+
+    assert reads
+    assert all(text.endswith(" up one\n") for text in reads)
+    assert [path.name for path in (tmp_path / "run").glob("gate.pid*")] == []
+
+
 def test_serve_records_the_release_each_process_runs_and_clears_a_stale_pid_file(
     serving: ModuleType, tmp_path: Path
 ) -> None:

@@ -293,7 +293,10 @@ def running_release(service: str) -> str:
     path = pid_file(service)
     if not pid_alive(path):
         return ""
-    return path.read_text().partition(" ")[2].strip()
+    try:
+        return path.read_text().partition(" ")[2].strip()
+    except OSError:  # serve removed it during a restart: nothing runs just now
+        return ""
 
 
 def probe_health(port: int) -> str:
@@ -425,7 +428,10 @@ def serve(service: str, argv: list[str], poll: float = SERVE_POLL_SECONDS) -> in
             else:
                 running_for = wanted
                 RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-                pid.write_text(f"{process.pid} {wanted}\n")
+                # Whole or not at all: `up` and `down` read it while we restart.
+                staged = pid.with_name(f"{pid.name}.tmp")
+                staged.write_text(f"{process.pid} {wanted}\n")
+                os.replace(staged, pid)
         try:
             changed = SCRIPT.stat().st_mtime_ns != loaded
         except OSError:  # git checkout is replacing the file; look again next time
