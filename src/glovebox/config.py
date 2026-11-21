@@ -1,8 +1,9 @@
 """Service configuration, read once from the environment at startup."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -21,6 +22,13 @@ class Settings:
     db_path: Path
     mail_url: str | None
     mail_fixture: Path | None
+    # Pins the clock the 30-day window is measured from. For tests and fixture stacks only:
+    # real time is used when this is unset.
+    fixed_now: datetime | None = None
+
+    def clock(self) -> Callable[[], datetime]:
+        fixed = self.fixed_now
+        return (lambda: datetime.now(UTC)) if fixed is None else (lambda: fixed)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -43,4 +51,18 @@ class Settings:
             db_path=Path(env.get("GLOVEBOX_DB") or DEFAULT_DB),
             mail_url=mail_url,
             mail_fixture=Path(mail_fixture) if mail_fixture else None,
+            fixed_now=parse_fixed_now(env.get("GLOVEBOX_FIXED_NOW")),
         )
+
+
+def parse_fixed_now(value: str | None) -> datetime | None:
+    """The pinned clock, if one is set: a timezone-aware ISO 8601 time."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        raise ConfigError("GLOVEBOX_FIXED_NOW must be an ISO 8601 time with a UTC offset")
+    return parsed.astimezone(UTC)

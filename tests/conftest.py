@@ -11,6 +11,9 @@ from pathlib import Path
 import pytest
 
 AGENT_TOKEN = "test-agent-token-0123456789abcdef"
+# The clock the gate runs on in tests, so the 30-day window is the same on every day.
+# Fixture mail is dated within the 30 days before it.
+NOW = "2026-01-10T12:00:00Z"
 
 
 @dataclass(frozen=True)
@@ -47,11 +50,12 @@ def run_gate(
     mail_fixture: Path | None = None,
     mail_url: str | None = None,
     token: str = AGENT_TOKEN,
+    now: str = NOW,
 ) -> Iterator[RunningGate]:
     """Run the service through its entry point on a free loopback port.
 
-    The database and the one mail source are the only things a test chooses; the
-    rest of the configuration is whatever the entry point defaults to.
+    The database, the one mail source and the clock are the only things a test
+    chooses; the rest of the configuration is whatever the entry point defaults to.
     """
     port = free_port()
     env = {k: v for k, v in os.environ.items() if not k.startswith("GLOVEBOX_")}
@@ -60,6 +64,7 @@ def run_gate(
         GLOVEBOX_PORT=str(port),
         GLOVEBOX_AGENT_TOKEN=token,
         GLOVEBOX_DB=str(db),
+        GLOVEBOX_FIXED_NOW=now,
     )
     if mail_fixture is not None:
         env["GLOVEBOX_MAIL_FIXTURE"] = str(mail_fixture)
@@ -94,8 +99,11 @@ def start_gate(tmp_path: Path) -> GateStarter:
         mail_fixture: Path | None = None,
         mail_url: str | None = None,
         token: str = AGENT_TOKEN,
+        now: str = NOW,
     ) -> AbstractContextManager[RunningGate]:
-        return run_gate(tmp_path / db, mail_fixture=mail_fixture, mail_url=mail_url, token=token)
+        return run_gate(
+            tmp_path / db, mail_fixture=mail_fixture, mail_url=mail_url, token=token, now=now
+        )
 
     return start
 

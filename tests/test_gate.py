@@ -21,13 +21,14 @@ from pathlib import Path
 
 import httpx2
 import pytest
-from mcp import Client
+from mcp import Client, types
 from mcp.shared.exceptions import MCPError
 
-from tests.client import READ_TOOL, agent_client
+from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, READ_TOOLS, agent_client
 from tests.conftest import AGENT_TOKEN, GateStarter, RunningGate
 from tests.hostile import (
     CORPUS,
+    OK_CALLS,
     assert_no_corpus,
     expected_hostile_received,
     hostile_mail_fixture,
@@ -93,7 +94,7 @@ def small_fixture() -> dict[str, object]:
 
 async def read_items(gate: RunningGate) -> list[dict[str, object]]:
     async with agent_client(gate) as client:
-        result = await client.call_tool(READ_TOOL)
+        result = await client.call_tool(LIST_TOOL)
     assert result.is_error is False
     return result_items(result)
 
@@ -137,7 +138,7 @@ def counting_source(fixture: dict[str, object]) -> Iterator[tuple[str, list[str]
 def test_requests_without_a_valid_token_are_rejected_before_any_tool_runs(
     start_gate: GateStarter,
 ) -> None:
-    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": READ_TOOL}}
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": LIST_TOOL}}
     accept = {"Accept": "application/json, text/event-stream"}
     wrong = [
         {},
@@ -199,11 +200,28 @@ def test_the_service_refuses_to_start_without_a_usable_token(tmp_path: Path) -> 
         assert result.returncode != 0
 
 
+def test_the_service_refuses_to_start_with_an_unusable_pinned_clock(tmp_path: Path) -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GLOVEBOX_")}
+    env["GLOVEBOX_DB"] = str(tmp_path / "glovebox.db")
+    env["GLOVEBOX_AGENT_TOKEN"] = AGENT_TOKEN
+    for pinned in ("yesterday", "2026-01-10T12:00:00", "2026-13-40T00:00:00Z"):
+        result = subprocess.run(
+            [sys.executable, "-m", "glovebox"],
+            env={**env, "GLOVEBOX_FIXED_NOW": pinned},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert pinned not in result.stderr
+
+
 # --- the tool surface -------------------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_only_the_read_tool_is_offered_with_a_closed_output_schema(gate: RunningGate) -> None:
+async def test_only_the_read_tools_are_offered_with_closed_schemas(gate: RunningGate) -> None:
     async with agent_client(gate) as client:
         tools = (await client.list_tools()).tools
         capabilities = client.server_capabilities
@@ -212,17 +230,16 @@ async def test_only_the_read_tool_is_offered_with_a_closed_output_schema(gate: R
         with pytest.raises(MCPError):
             await client.list_prompts()
 
-    assert [tool.name for tool in tools] == [READ_TOOL]
+    assert [tool.name for tool in tools] == READ_TOOLS
     assert capabilities.resources is None
     assert capabilities.prompts is None
     assert capabilities.tools is not None
-    tool = tools[0]
-    assert tool.annotations is not None
-    assert tool.annotations.read_only_hint is True
-    assert tool.output_schema is not None
-    assert closed_schema_problems(tool.output_schema) == []
-    assert closed_schema_problems(tool.input_schema) == []
-    assert tool.input_schema["properties"] == {}
+    for tool in tools:
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is True
+        assert tool.output_schema is not None
+        assert closed_schema_problems(tool.output_schema) == []
+        assert closed_schema_problems(tool.input_schema) == []
 
 
 def test_the_schema_check_finds_open_strings_and_objects() -> None:
@@ -250,7 +267,7 @@ async def test_the_read_tool_returns_only_structured_permitted_fields(
     fixture = write_fixture(tmp_path / "mail.json", small_fixture())
     with start_gate(mail_fixture=fixture) as gate:
         async with agent_client(gate) as client:
-            result = await client.call_tool(READ_TOOL)
+            result = await client.call_tool(LIST_TOOL)
 
     assert result.content == []
     assert result.is_error is False
@@ -258,7 +275,8 @@ async def test_the_read_tool_returns_only_structured_permitted_fields(
     assert set(result.meta or {}) <= {"io.modelcontextprotocol/serverInfo"}
     structured = result.structured_content
     assert isinstance(structured, dict)
-    assert set(structured) == {"error", "items"}
+    assert set(structured) == {"error", "items", "next_cursor"}
+    assert structured["next_cursor"] is None
     assert structured["error"] == "none"
     items = result_items(result)
     # Newest first.
@@ -300,13 +318,16 @@ async def test_a_call_with_arguments_or_an_unknown_tool_gets_a_fixed_error(
     fixture = write_fixture(tmp_path / "mail.json", small_fixture())
     with start_gate(mail_fixture=fixture) as gate:
         async with agent_client(gate) as client:
-            with_arguments = await client.call_tool(READ_TOOL, {"query": "anything"})
+            with_arguments = await client.call_tool(LIST_TOOL, {"query": "anything"})
             unknown = await client.call_tool("send_email", {})
 
-    for result, error in ((with_arguments, "invalid_arguments"), (unknown, "unknown_tool")):
+    for result, expected in (
+        (with_arguments, {"error": "invalid_arguments", "items": [], "next_cursor": None}),
+        (unknown, {"error": "unknown_tool"}),
+    ):
         assert result.is_error is True
         assert result.content == []
-        assert result.structured_content == {"error": error, "items": []}
+        assert result.structured_content == expected
 
 
 @pytest.mark.anyio
@@ -319,11 +340,27 @@ async def test_a_source_that_cannot_be_read_is_a_fixed_error_not_an_empty_inbox(
     for gate_options in ({}, {"mail_fixture": missing}, {"mail_fixture": broken}):
         with start_gate(**gate_options) as gate:
             async with agent_client(gate) as client:
-                result = await client.call_tool(READ_TOOL)
-            assert result.is_error is True
-            assert result.content == []
-            assert result.structured_content == {"error": "source_unavailable", "items": []}
-            assert_no_corpus({"result": result.model_dump_json(by_alias=True)})
+                results = {
+                    tool: await client.call_tool(tool, OK_CALLS[tool]) for tool in READ_TOOLS
+                }
+            for result in results.values():
+                assert result.is_error is True
+                assert result.content == []
+                assert_no_corpus({"result": result.model_dump_json(by_alias=True)})
+            assert results[LIST_TOOL].structured_content == {
+                "error": "source_unavailable",
+                "items": [],
+                "next_cursor": None,
+            }
+            assert results[COUNT_TOOL].structured_content == {
+                "error": "source_unavailable",
+                "count": "0",
+            }
+            assert results[GROUP_TOOL].structured_content == {
+                "error": "source_unavailable",
+                "groups": [],
+                "next_cursor": None,
+            }
 
 
 # --- handles ----------------------------------------------------------------------------
@@ -341,7 +378,7 @@ async def test_only_the_configured_account_is_served_when_the_source_changes(
         {
             "id": "d1",
             "from": "erin@example.test",
-            "received": "2026-02-01T12:00:00Z",
+            "received": "2026-01-07T12:00:00Z",
             "read": False,
         }
     ]
@@ -354,7 +391,7 @@ async def test_only_the_configured_account_is_served_when_the_source_changes(
         back = await read_items(gate)
 
     assert len(before) == 3
-    assert [item["received"] for item in after] == ["2026-02-01T12:00Z"]
+    assert [item["received"] for item in after] == ["2026-01-07T12:00Z"]
     assert after[0]["account_handle"] != before[0]["account_handle"]
     assert back == before
 
@@ -449,12 +486,18 @@ async def test_a_response_that_fails_validation_is_replaced_by_the_fixed_error(
                     "where item_handle = new.item_handle; end"
                 )
         async with agent_client(gate) as client:
-            result = await client.call_tool(READ_TOOL)
+            listed = await client.call_tool(LIST_TOOL)
+            grouped = await client.call_tool(GROUP_TOOL, {"group_by": "read_status"})
 
-    assert result.is_error is True
-    assert result.content == []
-    assert result.structured_content == {"error": "response_invalid", "items": []}
-    assert_no_corpus({"result": result.model_dump_json(by_alias=True)})
+    refusals: list[tuple[types.CallToolResult, dict[str, object]]] = [
+        (listed, {"error": "response_invalid", "items": [], "next_cursor": None}),
+        (grouped, {"error": "response_invalid", "groups": [], "next_cursor": None}),
+    ]
+    for result, expected in refusals:
+        assert result.is_error is True
+        assert result.content == []
+        assert result.structured_content == expected
+        assert_no_corpus({"result": result.model_dump_json(by_alias=True)})
 
 
 # --- the throwaway fixture cast ---------------------------------------------------------
@@ -496,7 +539,11 @@ async def test_an_unseeded_stand_in_is_a_fixed_error(
     with serve("mailbox-mail", tmp_path / "unseeded") as source_url:
         with start_gate(mail_url=source_url) as gate:
             async with agent_client(gate) as client:
-                result = await client.call_tool(READ_TOOL)
+                result = await client.call_tool(LIST_TOOL)
 
     assert result.is_error is True
-    assert result.structured_content == {"error": "source_unavailable", "items": []}
+    assert result.structured_content == {
+        "error": "source_unavailable",
+        "items": [],
+        "next_cursor": None,
+    }
