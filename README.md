@@ -2,7 +2,7 @@
 
 A gated data layer for self-hosted AI agents. It is meant to serve mail, calendar and messenger data to agents as permitted fields only, so that free-form text an attacker wrote does not cross the gate into the agent's context.
 
-The project is at its scaffold: the service starts and answers an MCP client over Streamable HTTP with an empty tool list. It reads no source and exposes no tool yet, and it has no authentication yet, so it listens on loopback by default.
+The project is at its first slice through the gate: an MCP client with the configured bearer token connects over Streamable HTTP and calls one read tool, `list_recent_mail`, which returns the recent items of a fixture mail account as handles and permitted fields only (item, account, sender and thread handles, source kind, received time at minute precision, read status, attachment presence). The only source is the fixture one the stand-ins serve, there is no further tool, and the token is one static value from configuration, so the service listens on loopback by default.
 
 ## The guarantee and what it does not claim
 
