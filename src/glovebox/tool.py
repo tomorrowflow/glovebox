@@ -4,7 +4,7 @@ import logging
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import anyio.to_thread
@@ -188,7 +188,9 @@ class ReadTool:
         clock: Callable[[], datetime],
         classifier: QuarantinedClassifier,
         config: ClassifierConfig,
+        imessage_max_silence: timedelta | None = None,
     ) -> None:
+        self._imessage_max_silence = imessage_max_silence
         self._store = store
         self._access = access
         self._clock = clock
@@ -280,8 +282,13 @@ class ReadTool:
             # Every selected account is tried, so the result tells how each one stands.
             for account in selected:
                 try:
-                    source = open_source(account.kind, account.source, account.credentials)
-                    fetched.append((account, source.fetch(window_start(now))))
+                    source = open_source(
+                        account.kind,
+                        account.source,
+                        account.credentials,
+                        self._imessage_max_silence,
+                    )
+                    fetched.append((account, source.fetch(window_start(now), now)))
                 except CredentialsError as error:
                     # The message is fixed text; the account name is the operator's own label.
                     # A credentials file that cannot be used is access that is not granted.

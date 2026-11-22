@@ -17,7 +17,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 from pathlib import Path
 from typing import Literal, Protocol, get_args
@@ -87,9 +87,10 @@ class SourceMailbox:
 class ItemSource(Protocol):
     kind: SourceKind
 
-    def fetch(self, since: datetime) -> SourceMailbox:
+    def fetch(self, since: datetime, now: datetime) -> SourceMailbox:
         """Fetch the account's recent items. `since` (UTC) is the start of the retrieval
-        window: a source may leave out anything older, and the gate drops it anyway.
+        window: a source may leave out anything older, and the gate drops it anyway. `now`
+        is the gate's clock, for a source that judges its own freshness.
 
         Raises SourceBlocked if access is not granted and SourceError for any other
         failure, never anything with detail.
@@ -119,7 +120,7 @@ class FixtureSource(ABC):
     @abstractmethod
     def parse(self, document: object) -> SourceMailbox: ...
 
-    def fetch(self, since: datetime) -> SourceMailbox:
+    def fetch(self, since: datetime, now: datetime) -> SourceMailbox:
         try:
             return self.parse(json.loads(self._read()))
         except SourceError:
@@ -233,21 +234,31 @@ class IMessageSource(FixtureSource):
 
     kind: SourceKind = "imessage"
 
+    def __init__(
+        self,
+        location: Path | str,
+        bearer: Secret | None = None,
+        max_silence: timedelta | None = None,
+    ) -> None:
+        super().__init__(location, bearer)
+        # For the local database only: a bridge answers for its own freshness.
+        self._max_silence = max_silence
+
     def parse(self, document: object) -> SourceMailbox:
         return parse_conversations(document)
 
-    def fetch(self, since: datetime) -> SourceMailbox:
+    def fetch(self, since: datetime, now: datetime) -> SourceMailbox:
         if isinstance(self._location, Path):
-            return self._read_database(self._location, since)
+            return self._read_database(self._location, since, now)
         if bridge_problem(self._location, self._bearer is not None) is not None:
             # Also enforced when the account is added; this holds if the stored source or
             # credentials changed since. Nothing is sent: access is not granted.
             raise SourceBlocked
-        return super().fetch(since)
+        return super().fetch(since, now)
 
-    def _read_database(self, path: Path, since: datetime) -> SourceMailbox:
+    def _read_database(self, path: Path, since: datetime, now: datetime) -> SourceMailbox:
         try:
-            found = chatdb.read_messages(path, since)
+            found = chatdb.read_messages(path, since, now=now, max_silence=self._max_silence)
         except chatdb.ChatDbBlocked:
             raise SourceBlocked from None
         except chatdb.ChatDbError:
@@ -440,15 +451,24 @@ FIXTURE_SOURCES: dict[str, type[FixtureSource]] = {
 BEARER_KINDS: frozenset[str] = frozenset({"imessage"})
 
 
-def open_source(kind: str, location: str, credentials: Path | None) -> ItemSource:
+def open_source(
+    kind: str,
+    location: str,
+    credentials: Path | None,
+    imessage_max_silence: timedelta | None = None,
+) -> ItemSource:
     """The adapter for one account, once its credentials file has passed the mode check.
 
+    `imessage_max_silence` is the setting of the iMessage source alone.
     Raises CredentialsError, which carries no detail, if the file cannot be used.
     """
     secret = read_credentials(credentials) if credentials is not None else None
     adapter = FIXTURE_SOURCES.get(kind)
     if adapter is None:
         raise SourceError
-    if urlsplit(location).scheme in ("http", "https"):
-        return adapter(location, secret if kind in BEARER_KINDS else None)
-    return adapter(Path(location))
+    is_url = urlsplit(location).scheme in ("http", "https")
+    where = location if is_url else Path(location)
+    bearer = secret if is_url and kind in BEARER_KINDS else None
+    if adapter is IMessageSource:
+        return IMessageSource(where, bearer, imessage_max_silence)
+    return adapter(where, bearer)

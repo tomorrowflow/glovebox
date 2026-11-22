@@ -31,7 +31,7 @@ import pytest
 from glovebox import chatdb
 from glovebox.access import Access
 from tests.client import ACCOUNTS_TOOL, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent_client
-from tests.conftest import GateStarter, RunningGate, operator
+from tests.conftest import GateStarter, RunningGate, clean_environment, free_port, operator
 from tests.hostile import CORPUS, assert_no_corpus, observe_gate
 from tests.test_failures import HOSTILE_BODY, account_of
 from tests.test_gate import storage_files, write_fixture
@@ -821,6 +821,7 @@ async def test_the_whole_first_minute_of_the_window_is_read(
     """The store keeps the window from its first minute, so the reader must not cut inside it."""
     messages_db.receive("early", BOB, "2025-12-11T12:00:10Z")  # in the window's first minute
     messages_db.receive("before", BOB, "2025-12-11T11:59:50Z")  # the minute before it
+    messages_db.receive("alive", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
     with start_gate(
         accounts={"chat": messages_db.path},
         kinds={"chat": IMESSAGE},
@@ -838,7 +839,7 @@ async def test_only_received_messages_are_items(
     start_gate: GateStarter, messages_db: MessagesDb
 ) -> None:
     messages_db.receive("in", BOB, "2026-01-05T18:00:00Z")
-    messages_db.receive("mine", OPERATOR_ID, "2026-01-05T18:01:00Z", sent_by_me=True)
+    messages_db.receive("mine", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
     messages_db.receive("tapback", BOB, "2026-01-05T18:02:00Z", reaction=2000, text="Loved it")
     messages_db.receive("untapback", BOB, "2026-01-05T18:03:00Z", reaction=3001, text="Removed")
     messages_db.receive("renamed", BOB, "2026-01-05T18:04:00Z", item_type=2, text=None)
@@ -867,6 +868,7 @@ async def test_a_message_without_a_sender_or_conversation_is_skipped_and_counted
             (apple_time("2026-01-05T18:02:00Z"),),
         )
         database.execute("insert into chat_message_join values (1, 3)")
+    messages_db.receive("alive", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
     with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
         async with agent_client(gate) as client:
             result = await call(client, LIST_TOOL)
@@ -898,6 +900,125 @@ async def test_a_database_the_gate_may_not_read_or_that_is_missing_is_blocked(
         assert account_of(down)["status"] == "blocked"
         assert account_of(down)["last_sync"] == current["last_sync"]
     assert account_of(after) == current
+
+
+QUIET_VAR = "GLOVEBOX_IMESSAGE_MAX_SILENCE_HOURS"
+
+
+@pytest.mark.anyio
+async def test_a_database_that_has_gone_quiet_is_stale_until_something_arrives(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    """The file stays readable when Messages stops syncing, so a long silence is not `current`."""
+    messages_db.receive("g1", BOB, "2026-01-09T12:00:00Z")
+    accounts = {"chat": messages_db.path}
+    with start_gate(accounts=accounts, kinds={"chat": IMESSAGE}) as gate:
+        async with agent_client(gate) as client:
+            first = await call(client, LIST_TOOL)
+    # Three and a half days later, with nothing new in the database.
+    with start_gate(
+        accounts=accounts, kinds={"chat": IMESSAGE}, now="2026-01-12T20:00:00Z"
+    ) as gate:
+        async with agent_client(gate) as client:
+            quiet = await call(client, LIST_TOOL)
+            counted = await call(client, COUNT_TOOL)
+            messages_db.receive("g2", BOB, "2026-01-12T19:00:00Z")
+            after = await call(client, LIST_TOOL)
+
+    assert account_of(first)["status"] == "current"
+    for result in (quiet, counted):
+        assert result["error"] == "source_unavailable"
+        assert account_of(result)["status"] == "stale"
+        # The last time the database showed signs of life is kept, not advanced.
+        assert account_of(result)["last_sync"] == FIRST_SYNC
+    assert quiet["items"] == [] and counted["count"] == "0"
+    assert account_of(after)["status"] == "current"
+    assert len(served(after)) == 2
+
+
+@pytest.mark.anyio
+async def test_any_activity_in_the_database_counts_as_alive(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    """The operator's own messages and reactions show that Messages is writing."""
+    messages_db.receive("old", BOB, "2026-01-02T12:00:00Z")
+    messages_db.receive("mine", OPERATOR_ID, "2026-01-10T09:00:00Z", sent_by_me=True)
+    messages_db.receive("tapback", BOB, "2026-01-10T10:00:00Z", reaction=2000)
+    with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, LIST_TOOL)
+
+    assert account_of(result)["status"] == "current"
+    assert [item["received"] for item in served(result)] == ["2026-01-02T12:00Z"]
+
+
+@pytest.mark.anyio
+async def test_an_empty_database_cannot_show_that_messages_works(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, LIST_TOOL)
+
+    assert result["error"] == "source_unavailable"
+    assert account_of(result)["status"] == "stale"
+
+
+@pytest.mark.anyio
+async def test_the_silence_limit_is_set_by_the_operator_and_zero_turns_it_off(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    messages_db.receive("g1", BOB, "2026-01-09T12:00:00Z")
+    accounts = {"chat": messages_db.path}
+    kinds = {"chat": IMESSAGE}
+    later = "2026-01-12T20:00:00Z"  # 80 hours after the message
+    with start_gate(accounts=accounts, kinds=kinds, now=later, extra_env={QUIET_VAR: "96"}) as gate:
+        async with agent_client(gate) as client:
+            roomy = await call(client, COUNT_TOOL)
+    with start_gate(accounts=accounts, kinds=kinds, now=later, extra_env={QUIET_VAR: "48"}) as gate:
+        async with agent_client(gate) as client:
+            tight = await call(client, COUNT_TOOL)
+    with start_gate(accounts=accounts, kinds=kinds, now=later, extra_env={QUIET_VAR: "0"}) as gate:
+        async with agent_client(gate) as client:
+            off = await call(client, COUNT_TOOL)
+
+    assert account_of(roomy)["status"] == "current"
+    assert account_of(tight)["status"] == "stale"
+    assert account_of(off)["status"] == "current"
+
+
+@pytest.mark.parametrize("value", ["-1", "soon", "1.5", "99999999999999999999"])
+def test_a_bad_silence_limit_stops_the_service_from_starting(tmp_path: Path, value: str) -> None:
+    started = subprocess.run(
+        [sys.executable, "-m", "glovebox"],
+        env={
+            **clean_environment(tmp_path / "glovebox.db"),
+            "GLOVEBOX_PORT": str(free_port()),
+            QUIET_VAR: value,
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert started.returncode == 1
+    assert QUIET_VAR in started.stderr
+    assert value not in started.stderr
+
+
+@pytest.mark.anyio
+async def test_a_bridge_is_not_judged_by_the_age_of_its_messages(start_gate: GateStarter) -> None:
+    """The silence limit reads the Mac's own database; a bridge answers for itself."""
+    with bridge_serving(triage()) as bridge:
+        with start_gate(
+            accounts={"chat": bridge.url}, kinds={"chat": IMESSAGE}, now="2026-11-22T12:00:00Z"
+        ) as gate:
+            async with agent_client(gate) as client:
+                result = await call(client, COUNT_TOOL)
+
+    assert result["error"] == "none" and result["count"] == "0"
+    assert account_of(result)["status"] == "current"
 
 
 @pytest.mark.anyio
@@ -1008,7 +1129,9 @@ def test_a_date_in_seconds_is_still_read(messages_db: MessagesDb) -> None:
         seconds = int((datetime(2026, 1, 6, 9, 30, tzinfo=UTC) - APPLE_EPOCH).total_seconds())
         database.execute("update message set date = ? where ROWID = 1", (seconds,))
 
-    mailbox = chatdb.read_messages(messages_db.path, datetime(2025, 12, 1, tzinfo=UTC))
+    mailbox = chatdb.read_messages(
+        messages_db.path, datetime(2025, 12, 1, tzinfo=UTC), now=NOW, max_silence=None
+    )
 
     assert [message.received for message in mailbox.messages] == [
         datetime(2026, 1, 6, 9, 30, tzinfo=UTC)
@@ -1036,8 +1159,7 @@ def test_a_malformed_typed_body_is_no_text_and_no_error(blob: bytes) -> None:
     assert chatdb.text_of_body(blob) == ""
 
 
-def thirty_days_before_now() -> datetime:
-    return datetime(2026, 1, 10, 12, tzinfo=UTC) - timedelta(days=30)
+NOW = datetime(2026, 1, 10, 12, tzinfo=UTC)
 
 
 def test_more_messages_than_the_cap_are_reported_as_missing(
@@ -1047,7 +1169,9 @@ def test_more_messages_than_the_cap_are_reported_as_missing(
         messages_db.receive(f"g{number}", BOB, f"2026-01-05T18:0{number}:00Z")
     monkeypatch.setattr(chatdb, "MAX_MESSAGES", 3)
 
-    mailbox = chatdb.read_messages(messages_db.path, thirty_days_before_now())
+    mailbox = chatdb.read_messages(
+        messages_db.path, NOW - timedelta(days=30), now=NOW, max_silence=None
+    )
 
     assert [message.guid for message in mailbox.messages] == ["g4", "g3", "g2"]
     assert mailbox.skipped == 2
@@ -1082,6 +1206,7 @@ async def test_the_acceptance_script_prints_permitted_fields_and_the_status(
     start_gate: GateStarter, messages_db: MessagesDb
 ) -> None:
     messages_db.receive("g1", BOB, "2026-01-05T18:00:00Z", text="Quokka-7731-verbatim")
+    messages_db.receive("alive", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
     with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
         current = await anyio.to_thread.run_sync(run_check, gate)
         messages_db.path.chmod(0o000)

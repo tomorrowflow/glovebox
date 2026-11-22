@@ -39,9 +39,9 @@
     {"id": "uvicorn>auth", "file": "src/glovebox/server.py", "line": 73, "note": "add_middleware makes the token check the outermost layer of the app."},
     {"id": "auth>mcp", "file": "src/glovebox/auth.py", "line": 31},
     {"id": "mcp>tool", "file": "src/glovebox/server.py", "line": 51},
-    {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 283},
-    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 300},
-    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 234},
+    {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 285},
+    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 307},
+    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 236},
     {"id": "main>uvicorn", "file": "src/glovebox/cli.py", "line": 195}
   ]
 }

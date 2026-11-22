@@ -17,6 +17,6 @@
     {"id": "glovebox", "file": "src/glovebox/tool.py", "line": 183, "note": "The read tools list_accounts, list_items, count_items, group_items and list_topics return permitted fields only, for the accounts the token covers, including four semantic fields a quarantined classifier proposes and the gate validates."},
     {"id": "mail", "file": "src/glovebox/sources.py", "line": 87, "note": "Fixture sources: a file or a stand-in, for mail (the mailbox.org mail stand-in) or for messenger conversations (the bridge stand-ins); and the iMessage source, which also reads the Mac's Messages database read-only (no real Mac has been tried yet)."},
     {"id": "agent>glovebox", "file": "src/glovebox/auth.py", "line": 17, "note": "The client reaches the service at /mcp over Streamable HTTP with a bearer token the operator issued and can revoke."},
-    {"id": "glovebox>mail", "file": "src/glovebox/tool.py", "line": 283}
+    {"id": "glovebox>mail", "file": "src/glovebox/tool.py", "line": 285}
   ]
 }

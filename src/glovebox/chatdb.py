@@ -57,6 +57,8 @@ order by m.date desc
 limit ?
 """
 
+NEWEST_QUERY = f"select max({SECONDS_OF_DATE}) from message m"
+
 _ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
 )
@@ -69,6 +71,11 @@ class ChatDbError(Exception):
 class ChatDbBlocked(ChatDbError):
     """The database is missing or this process may not open it: Messages is not set up for
     this user, or the permission to read it is not granted."""
+
+
+class ChatDbSilent(ChatDbError):
+    """The database is readable but shows no recent activity, so it may no longer be
+    receiving: Messages signed out, not syncing, or not running."""
 
 
 @dataclass(frozen=True)
@@ -118,15 +125,28 @@ def open_read_only(path: Path) -> Iterator[sqlite3.Connection]:
         raise ChatDbError from None
 
 
-def read_messages(path: Path, since: datetime) -> ChatMessages:
+def read_messages(
+    path: Path, since: datetime, *, now: datetime, max_silence: timedelta | None
+) -> ChatMessages:
     """The received messages from the minute of `since` (UTC) on, newest first, at most
     MAX_MESSAGES. The whole first minute is read: the gate keeps its window from the start of
-    that minute, so a cut inside it would drop messages the gate would serve."""
+    that minute, so a cut inside it would drop messages the gate would serve.
+
+    Raises ChatDbSilent if `max_silence` is set and the database shows no activity of any
+    kind (a message of either direction, a reaction) in that long before `now`.
+    """
     seconds = (since.replace(second=0, microsecond=0) - APPLE_EPOCH).total_seconds()
     messages: list[ChatMessage] = []
     skipped = 0
     with open_read_only(path) as database:
         rows = database.execute(QUERY, (seconds, MAX_MESSAGES)).fetchall()
+        newest = database.execute(NEWEST_QUERY).fetchone()[0]
+    if max_silence is not None:
+        # A readable file proves only that it can be opened. Messages that stops syncing
+        # leaves it readable, so an account with no sign of life is not `current`.
+        last_activity = _time_of(newest)
+        if last_activity is None or now - last_activity > max_silence:
+            raise ChatDbSilent
     total = int(rows[0][-1]) if rows else 0
     for row in rows:
         message = _message_of(row[:-1])
