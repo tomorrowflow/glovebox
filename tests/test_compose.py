@@ -1,7 +1,7 @@
 """Where the published gate port listens on each tier (ADR 0007).
 
-The gate accepts only issued agent tokens, but its allowed-hosts setting is loopback only,
-so no tier publishes it beyond loopback.
+The gate accepts only issued agent tokens and serves loopback Host headers unless told
+otherwise, and the Docker tiers set nothing else, so none of them publishes it beyond loopback.
 """
 
 import json

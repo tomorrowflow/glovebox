@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import RunningGate
+from tests.test_env_file import load_env_module
 
 ENV_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "env.py"
 UNHEALTHY = "gate: unhealthy\ncheck: unhealthy\n"
@@ -86,6 +87,49 @@ def test_check_passes_against_a_running_gate(gate: RunningGate) -> None:
     env = {**os.environ, "GLOVEBOX_TEST_TOKEN": gate.token}
 
     assert_status(run_env("check", "--url", gate.url, env=env), 0, "gate: ok\ncheck: healthy\n")
+
+
+@pytest.mark.parametrize("path", ["", "/"])
+def test_check_adds_the_mcp_path_to_an_origin_only_url(gate: RunningGate, path: str) -> None:
+    env = {**os.environ, "GLOVEBOX_TEST_TOKEN": gate.token}
+    origin = gate.url.removesuffix("/mcp")
+
+    assert_status(
+        run_env("check", "--url", origin + path, env=env), 0, "gate: ok\ncheck: healthy\n"
+    )
+
+
+def test_check_keeps_an_explicit_path_and_does_not_fall_back_to_mcp(gate: RunningGate) -> None:
+    env = {**os.environ, "GLOVEBOX_TEST_TOKEN": gate.token}
+    origin = gate.url.removesuffix("/mcp")
+
+    # The token is valid, so /elsewhere is unhealthy only because the gate has no MCP
+    # endpoint there: the path was probed as given, not replaced by /mcp.
+    assert_status(run_env("check", "--url", f"{origin}/elsewhere", env=env), 1, UNHEALTHY)
+    assert_status(run_env("check", "--url", gate.url, env=env), 0, "gate: ok\ncheck: healthy\n")
+
+
+@pytest.mark.parametrize(
+    ("given", "probed"),
+    [
+        ("https://h.ts.net:8765", "https://h.ts.net:8765/mcp"),
+        ("https://h.ts.net:8765/", "https://h.ts.net:8765/mcp"),
+        ("https://h.ts.net", "https://h.ts.net/mcp"),
+        ("http://[::1]:8765", "http://[::1]:8765/mcp"),
+        ("https://h.ts.net:8765/mcp", "https://h.ts.net:8765/mcp"),
+        ("https://h.ts.net:8765/mcp/", "https://h.ts.net:8765/mcp/"),
+        ("https://h.ts.net:8765/v1/mcp", "https://h.ts.net:8765/v1/mcp"),
+        ("https://h.ts.net:8765/other", "https://h.ts.net:8765/other"),
+        ("https://h.ts.net:8765?x=1", "https://h.ts.net:8765/mcp?x=1"),
+        ("https://h.ts.net:8765/mcp?x=1", "https://h.ts.net:8765/mcp?x=1"),
+        ("not a url", "not a url"),
+        ("ftp://h.ts.net", "ftp://h.ts.net"),
+    ],
+)
+def test_the_url_check_probes_is_the_given_one_plus_mcp_only_for_an_origin(
+    given: str, probed: str
+) -> None:
+    assert load_env_module().gate_url(given) == probed
 
 
 def test_check_is_unhealthy_against_a_gate_that_refuses_its_token(gate: RunningGate) -> None:

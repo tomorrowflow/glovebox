@@ -15,8 +15,10 @@ import fcntl
 import getpass
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -26,7 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -54,6 +56,19 @@ SERVICE = "glovebox-test-env.service"
 TIERS = ("throwaway", "test")
 STACK_SERVICES = ("gate", "standins")
 INITIALIZE_ID = 1  # the JSON-RPC id of the initialize request `check` sends
+GATE_PATH = "/mcp"  # where the gate serves MCP; `check --url` adds it to an origin-only URL
+LOOPBACK = "127.0.0.1"
+# Where the gate may be published besides loopback: the tailnet's own addresses (Tailscale's
+# CGNAT range and its IPv6 range), which only the tailnet can reach.
+TAILNET_NETWORKS = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fd7a:115c:a1e0::/48"),
+)
+# One exact Host header value; the same rule as the gate's GLOVEBOX_ALLOWED_HOSTS
+# (src/glovebox/config.py), checked here so that a bad value fails `up` and not the gate.
+HOST_PATTERN = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[[0-9a-f:]+\])(?::(?P<port>[0-9]{1,5}))?"
+)
 
 # The stand-ins' ports and the variables that tell the gate where they answer. They
 # mirror compose.yaml, where the host is `standins`; natively it is loopback.
@@ -209,6 +224,57 @@ def native_gate_port() -> int:
     return int(raw)
 
 
+def native_env() -> dict[str, str]:
+    """The environment the native services get: the process's, overridden by the env file.
+
+    The launchd daemons only have what their plists give them, so the env file is where
+    the operator sets the knobs that need no new bootstrap.
+    """
+    return {**os.environ, **read_env_file()}
+
+
+def native_publish_host(env: Mapping[str, str]) -> str:
+    """The address the gate listens on: loopback, or one tailnet address, never a wildcard.
+
+    A tailnet address is only reachable from the tailnet. Anything else, including
+    `0.0.0.0` and `::`, is refused here: wider exposure is not a setting of this tool.
+    """
+    raw = env.get("GLOVEBOX_ENV_PUBLISH_HOST", LOOPBACK)
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        address = None
+    if address is None or not (
+        address.is_loopback or any(address in network for network in TAILNET_NETWORKS)
+    ):
+        raise SystemExit("GLOVEBOX_ENV_PUBLISH_HOST must be a loopback or tailnet IP address")
+    return str(address)
+
+
+def authority(host: str, port: int) -> str:
+    """`host:port` as a Host header or URL shows it: an IPv6 address is bracketed."""
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def native_allowed_hosts(env: Mapping[str, str], host: str, port: int) -> list[str]:
+    """The Host header values the gate serves besides its loopback defaults.
+
+    The ones the operator lists, each exact, and the gate's own address when it is not
+    one of the defaults, so that `check` can probe it. Empty means loopback only.
+    """
+    raw = env.get("GLOVEBOX_ENV_ALLOWED_HOSTS", "")
+    hosts = [entry.strip().lower() for entry in raw.split(",")] if raw.strip() else []
+    matches = [HOST_PATTERN.fullmatch(entry) for entry in hosts]
+    if any(match is None or int(match["port"] or 0) > 65535 for match in matches):
+        raise SystemExit(
+            "GLOVEBOX_ENV_ALLOWED_HOSTS must list exact host names or host:port values,"
+            " separated by commas, without wildcards"
+        )
+    if host not in (LOOPBACK, "::1") and authority(host, port) not in hosts:
+        hosts.append(authority(host, port))
+    return hosts
+
+
 def venv_python() -> Path:
     return VENV / "bin" / "python"
 
@@ -216,16 +282,22 @@ def venv_python() -> Path:
 def service_plan(service: str) -> tuple[list[str], dict[str, str]]:
     """The command and environment that run one native service.
 
-    Everything binds loopback only, like the Docker test tier (the gate's allowed
-    hosts are loopback only). The stand-ins are reached by their loopback ports. The
-    gate registers the test token as an issued agent token for the fixture account
-    when it starts, and keeps its database next to the seeded state, so `down`
-    removes both.
+    The gate binds loopback unless GLOVEBOX_ENV_PUBLISH_HOST names a tailnet address,
+    and serves loopback Host headers plus exactly those in GLOVEBOX_ENV_ALLOWED_HOSTS
+    (the Mac mini keeps the gate on loopback behind tailnet-only HTTPS). The stand-ins
+    always bind loopback and are reached by their loopback ports. The gate registers
+    the test token as an issued agent token for the fixture account when it starts,
+    and keeps its database next to the seeded state, so `down` removes both.
     """
-    env = {**os.environ, **read_env_file()}
+    env = native_env()
     if service == "gate":
-        env["GLOVEBOX_HOST"] = "127.0.0.1"
-        env["GLOVEBOX_PORT"] = str(native_gate_port())
+        host, port = native_publish_host(env), native_gate_port()
+        env["GLOVEBOX_HOST"] = host
+        env["GLOVEBOX_PORT"] = str(port)
+        # Only the knob counts: a setting of the gate's own in the daemon's environment is dropped.
+        env.pop("GLOVEBOX_ALLOWED_HOSTS", None)
+        if allowed := native_allowed_hosts(env, host, port):
+            env["GLOVEBOX_ALLOWED_HOSTS"] = ",".join(allowed)
         env["GLOVEBOX_DB"] = str(SEED_STATE.parent / "glovebox.db")
         if TOKEN_VAR in env:
             env["GLOVEBOX_FIXTURE_TOKEN"] = env[TOKEN_VAR]
@@ -327,8 +399,8 @@ def native_standins_status() -> str:
 
 
 def native_status() -> tuple[str, str]:
-    """The gate's and the stand-ins' status words, probed over loopback."""
-    url = f"http://127.0.0.1:{native_gate_port()}/mcp"
+    """The gate's status word, probed where it listens, and the stand-ins', over loopback."""
+    url = f"http://{authority(native_publish_host(native_env()), native_gate_port())}{GATE_PATH}"
     return probe_gate(url, read_token(TOKEN_VAR)), native_standins_status()
 
 
@@ -343,6 +415,7 @@ def native_up() -> int:
     if sys.version_info < MIN_PYTHON:
         print("up: python 3.12 or newer is required")
         return 1
+    service_plan("gate")  # refuses a bad publish host or allowed host before anything changes
     if not install_dependencies() or not native_seed():
         return 1
     wanted = f"up {release_fingerprint()}"
@@ -610,10 +683,21 @@ def local_gate_url(tier: str) -> str | None:
     return f"http://127.0.0.1:{port}/mcp"
 
 
+def gate_url(url: str) -> str:
+    """The URL to probe: an origin-only URL gets the gate's MCP path, any other path stays."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url  # the probe reports it
+    if parts.scheme in ("http", "https") and parts.netloc and parts.path in ("", "/"):
+        return urllib.parse.urlunsplit(parts._replace(path=GATE_PATH))
+    return url
+
+
 def command_check(args: argparse.Namespace) -> int:
     standins = "ok"
     if args.url is not None:
-        gate = probe_gate(args.url, os.environ.get(args.token_env))
+        gate = probe_gate(gate_url(args.url), os.environ.get(args.token_env))
     else:
         tier = resolve_tier(args.tier)
         if backend(tier) == "native":

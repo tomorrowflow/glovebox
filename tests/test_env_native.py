@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from glovebox.config import ConfigError, parse_allowed_hosts
 from tests.test_env_file import ROOT, load_env_module
 from tests.test_standins import STANDINS, load_module
 
@@ -305,6 +306,157 @@ def test_the_gate_port_follows_the_publish_port_knob(
     _, environment = env.service_plan("gate")
 
     assert environment["GLOVEBOX_PORT"] == "18765"
+
+
+def test_the_gate_defaults_to_loopback_with_no_extra_allowed_hosts(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An ambient setting of the gate's own is not passed through: only the knobs count.
+    monkeypatch.setenv("GLOVEBOX_ALLOWED_HOSTS", "*")
+
+    _, environment = env.service_plan("gate")
+
+    assert environment["GLOVEBOX_HOST"] == "127.0.0.1"
+    assert "GLOVEBOX_ALLOWED_HOSTS" not in environment
+
+
+def test_the_allowed_hosts_knob_reaches_the_gate_from_the_environment_or_the_env_file(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", "a.ts.net:8765")
+    _, from_environment = env.service_plan("gate")
+
+    # The daemon's environment comes from its plist, so the env file is where the operator sets it.
+    monkeypatch.delenv("GLOVEBOX_ENV_ALLOWED_HOSTS")
+    (tmp_path / ".env").write_text("GLOVEBOX_ENV_ALLOWED_HOSTS=b.ts.net:8765, c.ts.net:8765\n")
+    _, from_file = env.service_plan("gate")
+
+    assert from_environment["GLOVEBOX_ALLOWED_HOSTS"] == "a.ts.net:8765"
+    assert from_file["GLOVEBOX_ALLOWED_HOSTS"] == "b.ts.net:8765,c.ts.net:8765"
+    assert from_file["GLOVEBOX_HOST"] == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["*", "*.ts.net", "host.ts.net:*", "a.ts.net,*", "a.ts.net,,b.ts.net", "https://a.ts.net:8765"],
+)
+def test_a_wildcard_or_malformed_allowed_host_is_rejected(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", value)
+
+    with pytest.raises(SystemExit, match="GLOVEBOX_ENV_ALLOWED_HOSTS"):
+        env.service_plan("gate")
+
+
+@pytest.mark.parametrize("value", ["a.ts.net:8765", "A.ts.net", "[::1]:8765", "a.ts.net:8765,b"])
+def test_the_runner_accepts_what_the_gate_accepts(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", value)
+    _, environment = env.service_plan("gate")
+
+    assert parse_allowed_hosts(environment["GLOVEBOX_ALLOWED_HOSTS"])
+
+
+@pytest.mark.parametrize("value", ["*", "a.ts.net:*", "a.ts.net:99999", "a.ts.net/mcp", "a b"])
+def test_the_runner_refuses_what_the_gate_refuses_so_up_fails_at_once(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", value)
+
+    with pytest.raises(ConfigError):
+        parse_allowed_hosts(value)
+    with pytest.raises(SystemExit):
+        env.service_plan("gate")
+
+
+@pytest.mark.parametrize(
+    ("address", "allowed"),
+    [
+        ("127.0.0.1", None),
+        ("::1", None),
+        # The gate answers loopback by default, but only 127.0.0.1 and ::1 by name.
+        ("127.0.0.2", "127.0.0.2:8765"),
+        ("100.101.102.103", "100.101.102.103:8765"),
+        ("fd7a:115c:a1e0::1", "[fd7a:115c:a1e0::1]:8765"),
+    ],
+)
+def test_the_publish_host_knob_moves_the_gate_to_a_loopback_or_tailnet_address(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, address: str, allowed: str | None
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", address)
+
+    _, environment = env.service_plan("gate")
+
+    assert environment["GLOVEBOX_HOST"] == address
+    # A gate bound off 127.0.0.1 must answer its own address, so that `check` can probe it.
+    assert environment.get("GLOVEBOX_ALLOWED_HOSTS") == allowed
+
+
+def test_the_published_address_joins_the_configured_hosts_without_repeating_one(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "100.101.102.103")
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "18765")
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", "a.ts.net:18765,100.101.102.103:18765")
+
+    _, environment = env.service_plan("gate")
+
+    assert environment["GLOVEBOX_ALLOWED_HOSTS"] == "a.ts.net:18765,100.101.102.103:18765"
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["", "0.0.0.0", "::", "192.168.1.5", "8.8.8.8", "10.0.0.1", "localhost", "a.ts.net", "[::1]"],
+)
+def test_a_wildcard_or_public_publish_host_is_rejected(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", address)
+
+    with pytest.raises(SystemExit, match="GLOVEBOX_ENV_PUBLISH_HOST"):
+        env.service_plan("gate")
+
+
+def test_the_stand_ins_stay_on_loopback_whatever_the_gate_publishes(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "100.101.102.103")
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", "a.ts.net:8765")
+
+    _, standins = env.service_plan("standins")
+    _, gate = env.service_plan("gate")
+
+    assert standins["STANDINS_HOST"] == "127.0.0.1"
+    assert "GLOVEBOX_ALLOWED_HOSTS" not in standins
+    assert gate["GLOVEBOX_STANDIN_MAILBOX_MAIL"] == "http://127.0.0.1:9101"
+
+
+def test_the_local_check_probes_the_address_the_gate_is_published_on(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probed = []
+
+    def record(url: str, token: str | None) -> str:
+        probed.append(url)
+        return "ok"
+
+    monkeypatch.setattr(env, "probe_gate", record)
+    monkeypatch.setattr(env, "native_standins_status", lambda: "ok")
+
+    env.native_status()
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "100.101.102.103")
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "18765")
+    env.native_status()
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "::1")
+    env.native_status()
+
+    assert probed == [
+        "http://127.0.0.1:8765/mcp",
+        "http://100.101.102.103:18765/mcp",
+        "http://[::1]:18765/mcp",
+    ]
 
 
 def test_the_standins_run_from_the_checkout_on_loopback_over_the_seeded_state(

@@ -20,7 +20,7 @@ Glovebox has a hosted runtime (the gate service and its SQLite database), so it 
 
 **Shared tooling.** Throwaway and test share one executable Python `scripts/env.py` with `up`, `check`, `reset`, `down`, `ensure-test` and `install-timer`, plus `serve` for the native daemons. Throwaway runs in Docker from one compose file. The test tier on macOS runs the gate and the stand-ins from a virtualenv built from the checkout. `up` creates the gitignored env file with the test token when it is missing. `install-timer` installs the user timer `glovebox-test-env.timer` where the platform is Linux, and writes the launchd plists on macOS.
 
-**Test endpoint.** Port **8765**. Nodes read `GLOVEBOX_TEST_URL` and `GLOVEBOX_TEST_TOKEN`. While the gate has no authentication it listens on loopback of the test host only; reaching it from other hosts needs a later change to the gate (`docs/environments.md`).
+**Test endpoint.** Port **8765**. Nodes read `GLOVEBOX_TEST_URL` and `GLOVEBOX_TEST_TOKEN`. The gate listens on loopback of the Mac mini only. Factory nodes reach it at `https://florians-mac-mini.tail974337.ts.net:8765` (GLB-1.13): tailnet-only HTTPS in front of the loopback listener, with that exact host listed in the gate's allowed hosts. There is no public listener and no wildcard host, the stand-ins stay on loopback, and the gate still refuses every request without an issued agent token (`docs/environments.md`). Any wider exposure is a new decision.
 
 **Test data.** A fictional fixture cast that `reset` seeds. Never real, pseudonymised or production-copied data. The test tier and the production tier share a machine but not a user, a checkout, a data directory or a secret: `glovebox-test` cannot read `frogger`'s files.
 
