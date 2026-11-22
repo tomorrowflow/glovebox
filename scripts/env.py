@@ -56,6 +56,8 @@ SERVICE = "glovebox-test-env.service"
 TIERS = ("throwaway", "test")
 STACK_SERVICES = ("gate", "standins")
 INITIALIZE_ID = 1  # the JSON-RPC id of the initialize request `check` sends
+# The gate settings `up` does not install but the runner passes on; they belong to the release.
+GATE_SETTINGS = ("GLOVEBOX_HOST", "GLOVEBOX_PORT", "GLOVEBOX_ALLOWED_HOSTS")
 GATE_PATH = "/mcp"  # where the gate serves MCP; `check --url` adds it to an origin-only URL
 LOOPBACK = "127.0.0.1"
 # Where the gate may be published besides loopback: the tailnet's own addresses (Tailscale's
@@ -316,10 +318,24 @@ def dependency_digest() -> str:
     return digest.hexdigest()
 
 
+def gate_settings_digest() -> str:
+    """Changes when the address, port or allowed hosts the gate is started with change."""
+    _, environment = service_plan("gate")
+    digest = hashlib.sha256()
+    for name in GATE_SETTINGS:
+        digest.update(f"{name}={environment.get(name, '')}\n".encode())
+    return digest.hexdigest()
+
+
 def release_fingerprint() -> str:
-    """Changes when the checked-out commit or the pinned dependencies change."""
+    """Changes when the commit, the pinned dependencies or the gate's settings change.
+
+    `serve` restarts a service only when the wanted release changes, so a setting that
+    is read from the env file must be part of the release, or `up` would leave the
+    running gate with its old environment. Only a digest is kept, never a value.
+    """
     head = git("rev-parse", "HEAD").stdout.strip() or "nogit"
-    return f"{head}-{dependency_digest()[:12]}"
+    return f"{head}-{dependency_digest()[:12]}-{gate_settings_digest()[:12]}"
 
 
 def install_dependencies() -> bool:

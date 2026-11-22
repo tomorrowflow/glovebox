@@ -609,6 +609,116 @@ def test_up_installs_seeds_and_asks_for_the_release_it_ran(
     assert env.read_env_file()["GLOVEBOX_TEST_TOKEN"]
 
 
+def test_the_release_changes_with_the_gate_settings_the_runner_reads(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=abc123\n")
+    before = env.release_fingerprint()
+    assert env.release_fingerprint() == before  # nothing changed: the same release
+
+    (tmp_path / ".env").write_text(
+        "GLOVEBOX_TEST_TOKEN=abc123\nGLOVEBOX_ENV_ALLOWED_HOSTS=a.ts.net:8765\n"
+    )
+    allowed = env.release_fingerprint()
+    (tmp_path / ".env").write_text(
+        "GLOVEBOX_TEST_TOKEN=abc123\nGLOVEBOX_ENV_ALLOWED_HOSTS=b.ts.net:8765\n"
+    )
+    other_host = env.release_fingerprint()
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "100.101.102.103")
+    published = env.release_fingerprint()
+    monkeypatch.delenv("GLOVEBOX_ENV_PUBLISH_HOST")
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "18765")
+    other_port = env.release_fingerprint()
+
+    assert len({before, allowed, other_host, published, other_port}) == 5
+
+
+def test_the_release_does_not_carry_the_settings_in_the_clear(
+    env: ModuleType, tmp_path: Path
+) -> None:
+    (tmp_path / ".env").write_text("GLOVEBOX_ENV_ALLOWED_HOSTS=florians.ts.net:8765\n")
+
+    assert "florians" not in env.release_fingerprint()
+
+
+def test_up_asks_for_a_new_release_when_the_allowed_hosts_in_the_env_file_change(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(env, "install_dependencies", lambda: True)
+    monkeypatch.setattr(env, "native_seed", lambda: True)
+    monkeypatch.setattr(env, "native_status", lambda: ("ok", "ok"))
+    monkeypatch.setattr(env, "running_release", lambda service: env.read_desired())
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=abc123\n")
+    assert env.main(["up"]) == 0
+    first = env.read_desired()
+    assert env.main(["up"]) == 0
+    assert env.read_desired() == first  # the same settings: the same release, nothing restarts
+
+    with (tmp_path / ".env").open("a") as env_file:
+        env_file.write("GLOVEBOX_ENV_ALLOWED_HOSTS=florians-mac-mini.tail974337.ts.net:8765\n")
+    assert env.main(["up"]) == 0
+
+    assert env.read_desired() != first
+
+
+def test_a_changed_allowed_host_reaches_the_running_gate_on_the_next_up(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole path: `.env`, then `up`, then `serve` restarts the gate with the new setting."""
+    seen = tmp_path / "gate-allowed-hosts"
+    real_plan = env.service_plan
+
+    def plan(service: str) -> tuple[list[str], dict[str, str]]:
+        _, environment = real_plan(service)
+        # A stand-in gate: it records the allowed hosts it was started with, then sleeps.
+        record = textwrap.dedent(
+            f"""\
+            import os, pathlib, time
+            hosts = os.environ.get('GLOVEBOX_ALLOWED_HOSTS', '-')
+            pathlib.Path({str(seen)!r}).write_text(hosts)
+            time.sleep(60)
+            """
+        )
+        return [sys.executable, "-c", record], environment
+
+    python = tmp_path / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setattr(env, "install_dependencies", lambda: True)
+    monkeypatch.setattr(env, "native_seed", lambda: True)
+    monkeypatch.setattr(env, "native_status", lambda: ("ok", "ok"))
+    monkeypatch.setattr(env, "running_release", lambda service: env.read_desired())
+    monkeypatch.setattr(env, "service_plan", plan)
+    monkeypatch.setattr(env, "RESTART_DELAY_SECONDS", 0)
+    handlers = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGINT)}
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=abc123\n")
+
+    failures: list[BaseException] = []
+
+    def script() -> None:
+        try:
+            assert env.main(["up"]) == 0
+            # Loopback only: the gate is told of no extra host.
+            wait_for(lambda: seen.exists() and seen.read_text() == "-")
+            first = running_pid(env)
+            with (tmp_path / ".env").open("a") as env_file:
+                env_file.write(
+                    "GLOVEBOX_ENV_ALLOWED_HOSTS=florians-mac-mini.tail974337.ts.net:8765\n"
+                )
+            assert env.main(["up"]) == 0
+            wait_for(lambda: running_pid(env) != first)
+            wait_for(lambda: seen.read_text() == "florians-mac-mini.tail974337.ts.net:8765")
+        except BaseException as failure:  # the driver runs in a thread: report it from here
+            failures.append(failure)
+
+    try:
+        assert run_serve(env, script) == 0
+    finally:
+        for number, handler in handlers.items():
+            signal.signal(number, handler)
+    assert failures == []
+
+
 def test_up_reports_a_start_that_never_became_healthy(
     env: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
