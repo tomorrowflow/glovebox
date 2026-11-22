@@ -136,6 +136,54 @@ def hostile_mail_fixture() -> dict[str, object]:
     return {"account": f"{CORPUS['marker']} <account@evil.test>", "messages": messages}
 
 
+def hostile_messenger_fixture() -> dict[str, object]:
+    """A fixture messenger with a corpus string in every attacker-writable field.
+
+    One group conversation per corpus string carries it in the account, the conversation
+    and message upstream IDs, the group name and topic, participant and sender names, the
+    body, the caption, a quote, a link preview, reaction strings, filenames, MIME strings and
+    a flag value, with a valid sent time. A second conversation per corpus string carries
+    it as the raw sent time, which no gate can parse.
+    """
+    conversations: list[dict[str, object]] = []
+    for index, text in enumerate(CORPUS.values()):
+        sent = datetime(2026, 1, 8, 8, index, 37, tzinfo=timezone(timedelta(hours=1)))
+        conversations.append(
+            {
+                "id": f"conv-{text}",
+                "group": True,
+                "name": text,
+                "topic": text,
+                "participants": [f"+{text}", f"{text} <p-{text}>"],
+                "messages": [
+                    {
+                        "id": f"msg-{text}",
+                        "from": f"+{text}",
+                        "sender_name": text,
+                        "profile_name": text,
+                        "sent": sent.isoformat(),
+                        "text": text,
+                        "caption": text,
+                        "quote": {"id": text, "text": text, "author": text},
+                        "preview": {"url": f"https://evil.test/{text}", "title": text},
+                        "reactions": [{"emoji": text, "from": text}],
+                        "read": text if index % 2 else False,
+                        "media": [{"filename": text, "mime": text, "type": f"{text}/{text}"}],
+                    }
+                ],
+            }
+        )
+    for text in CORPUS.values():
+        conversations.append(
+            {
+                "id": f"bad-sent-{text}",
+                "name": text,
+                "messages": [{"id": f"bad-{text}", "from": f"+{text}", "sent": text, "text": text}],
+            }
+        )
+    return {"account": f"+{CORPUS['marker']}", "conversations": conversations}
+
+
 FILTER_PARAMETERS = (
     "read_status",
     "received_from",

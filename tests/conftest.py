@@ -72,13 +72,17 @@ def operator(db: Path, *args: str, **extra: str) -> subprocess.CompletedProcess[
 
 
 def provision(
-    db: Path, accounts: Mapping[str, Path | str], tokens: Mapping[str, Sequence[str]]
+    db: Path,
+    accounts: Mapping[str, Path | str],
+    tokens: Mapping[str, Sequence[str]],
+    kinds: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Add the accounts and issue the tokens that `db` does not hold yet, through the CLI.
 
     Idempotent per database, so that starting a gate twice on one database is a restart:
     an account that exists is kept (re-pointed if its source changed, below the CLI on
     purpose) and a token already issued keeps its value. Returns every token by label.
+    An account is a `fixture_mail` account unless `kinds` names another source kind for it.
     """
     issued = _ISSUED.setdefault(db, {})
     existing = {
@@ -89,9 +93,8 @@ def provision(
     for name, source in accounts.items():
         location = str(source) if str(source).startswith("http") else str(Path(source).absolute())
         if name not in existing:
-            added = operator(
-                db, "account", "add", name, "--kind", "fixture_mail", "--source", location
-            )
+            kind = (kinds or {}).get(name, "fixture_mail")
+            added = operator(db, "account", "add", name, "--kind", kind, "--source", location)
             assert added.returncode == 0, added.stderr
         elif existing[name] != location:
             Access(db).set_source(name, location)
@@ -115,6 +118,7 @@ def run_gate(
     now: str = NOW,
     extra_env: Mapping[str, str] | None = None,
     command: Sequence[str] = (),
+    kinds: Mapping[str, str] | None = None,
 ) -> Iterator[RunningGate]:
     """Run the service through its entry point on a free loopback port.
 
@@ -123,7 +127,7 @@ def run_gate(
     configuration the service gets.
     """
     wanted = tokens if tokens is not None else {default_token: list(accounts)}
-    issued = provision(db, accounts, wanted)
+    issued = provision(db, accounts, wanted, kinds)
     port = free_port()
     env = clean_environment(
         db, GLOVEBOX_HOST="127.0.0.1", GLOVEBOX_PORT=str(port), GLOVEBOX_FIXED_NOW=now
@@ -159,8 +163,9 @@ def start_gate(tmp_path: Path) -> GateStarter:
     With `mail_fixture` or `mail_url` the gate has one account, `fixture`, and one token,
     `default`, that covers it. With neither, the account's source is a file that does not
     exist. `accounts` (name to fixture file or stand-in URL) and `tokens` (label to the
-    account names it covers) set up more. Starting twice with the same `db` name is a
-    restart of the same service.
+    account names it covers) set up more; `kinds` (account name to source kind) makes an
+    account something other than a fixture mail account. Starting twice with the same `db`
+    name is a restart of the same service.
     """
 
     def start(
@@ -173,6 +178,7 @@ def start_gate(tmp_path: Path) -> GateStarter:
         tokens: Mapping[str, Sequence[str]] | None = None,
         now: str = NOW,
         extra_env: Mapping[str, str] | None = None,
+        kinds: Mapping[str, str] | None = None,
     ) -> AbstractContextManager[RunningGate]:
         source: Path | str = mail_url or mail_fixture or tmp_path / "no-such-mail.json"
         return run_gate(
@@ -182,6 +188,7 @@ def start_gate(tmp_path: Path) -> GateStarter:
             default_token=token,
             now=now,
             extra_env=extra_env,
+            kinds=kinds,
         )
 
     return start
