@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from glovebox.config import ConfigError, parse_allowed_hosts
+from glovebox.config import HOST_PATTERN, ConfigError, parse_allowed_hosts
 from tests.test_env_file import ROOT, load_env_module
 from tests.test_standins import STANDINS, load_module
 
@@ -359,7 +359,13 @@ def test_the_runner_accepts_what_the_gate_accepts(
     assert parse_allowed_hosts(environment["GLOVEBOX_ALLOWED_HOSTS"])
 
 
-@pytest.mark.parametrize("value", ["*", "a.ts.net:*", "a.ts.net:99999", "a.ts.net/mcp", "a b"])
+def test_the_runner_and_the_gate_share_one_host_pattern(env: ModuleType) -> None:
+    assert env.HOST_PATTERN.pattern == HOST_PATTERN.pattern
+
+
+@pytest.mark.parametrize(
+    "value", ["*", "a.ts.net:*", "a.ts.net:99999", "[::1]:99999", "a.ts.net/mcp", "a b"]
+)
 def test_the_runner_refuses_what_the_gate_refuses_so_up_fails_at_once(
     env: ModuleType, monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
@@ -642,6 +648,21 @@ def test_up_stops_at_a_failed_install(
 
     assert env.read_desired() == ""
     assert "up: ok" not in capsys.readouterr().out
+
+
+def test_up_refuses_a_wildcard_publish_host_before_it_installs_or_asks_for_anything(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = Recorder()
+    monkeypatch.setattr(env, "run_command", recorder)
+    monkeypatch.setattr(env, "install_dependencies", lambda: pytest.fail("installed"))
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "0.0.0.0")
+
+    with pytest.raises(SystemExit, match="GLOVEBOX_ENV_PUBLISH_HOST"):
+        env.main(["up"])
+
+    assert recorder.commands == []
+    assert env.read_desired() == ""
 
 
 def test_dependencies_install_once_per_set_of_pins(

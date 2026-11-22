@@ -8,6 +8,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx2
 import pytest
@@ -41,7 +42,7 @@ def test_the_default_serves_loopback_hosts_and_refuses_every_other(
     start_gate: GateStarter,
 ) -> None:
     with start_gate() as gate:
-        port = gate.url.split(":")[2].split("/")[0]
+        port = urlsplit(gate.url).port
         assert initialize(gate.url, token=gate.token).status_code == 200
         for host in (f"localhost:{port}", f"[::1]:{port}"):
             assert initialize(gate.url, host=host, token=gate.token).status_code == 200
