@@ -306,6 +306,8 @@ async def test_one_call_lists_filters_groups_counts_and_pages_across_both_kinds(
                 for entry in (await call(client, "list_accounts"))["accounts"]
             }
             by_kind = await call(client, GROUP_TOOL, group_by="source_kind")
+            by_thread = await call(client, GROUP_TOOL, group_by="thread_handle")
+            by_sender = await call(client, GROUP_TOOL, group_by="sender_handle")
             counted = await call(client, COUNT_TOOL)
             unread = await listed(client, read_status="unread")
             attached = await listed(client, has_attachments=True)
@@ -327,6 +329,9 @@ async def test_one_call_lists_filters_groups_counts_and_pages_across_both_kinds(
     assert {item["source_kind"] for item in everything} == {"fixture_mail", MESSENGER}
     assert texts(everything) == sorted(texts(everything))
     assert counted["count"] == "8"
+    # Mail threads and messenger conversations are grouped together, as are their senders.
+    assert [group["count"] for group in by_thread["groups"]] == ["2", "2", "2", "1", "1"]
+    assert [group["count"] for group in by_sender["groups"]] == ["3", "2", "2", "1"]
     assert by_kind["groups"] == [
         {"key": MESSENGER, "count": "5"},
         {"key": "fixture_mail", "count": "3"},
@@ -575,7 +580,7 @@ async def test_the_signal_stand_in_cast_is_served_as_messenger_items(
             async with agent_client(gate) as client:
                 items = await listed(client)
 
-    # The two accounts have one message each; the same fictional person is two handles.
+    # The two accounts have one message each, from two senders with two handles.
     assert texts(items) == ["2026-01-05T18:00Z", "2026-01-06T07:10Z"]
     assert {item["source_kind"] for item in items} == {MESSENGER}
     assert len({item["sender_handle"] for item in items}) == 2

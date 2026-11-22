@@ -13,6 +13,7 @@ import http.client
 import json
 import urllib.error
 import urllib.request
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -88,7 +89,7 @@ class ItemSource(Protocol):
         ...
 
 
-class FixtureSource:
+class FixtureSource(ABC):
     """A fixture document, read from a file or from a stand-in over HTTP, and the way an
     unreadable one is told apart from one that refuses access. A subclass names the kind
     and parses the document."""
@@ -98,8 +99,8 @@ class FixtureSource:
     def __init__(self, location: Path | str) -> None:
         self._location = location
 
-    def parse(self, document: object) -> SourceMailbox:
-        raise NotImplementedError
+    @abstractmethod
+    def parse(self, document: object) -> SourceMailbox: ...
 
     def fetch(self) -> SourceMailbox:
         try:
@@ -323,6 +324,12 @@ def parse_received(value: object) -> datetime | None:
         return None
 
 
+FIXTURE_SOURCES: dict[str, type[FixtureSource]] = {
+    "fixture_mail": FixtureMailSource,
+    "fixture_messenger": FixtureMessengerSource,
+}
+
+
 def open_source(kind: str, location: str, credentials: Path | None) -> ItemSource:
     """The adapter for one account, once its credentials file has passed the mode check.
 
@@ -332,11 +339,8 @@ def open_source(kind: str, location: str, credentials: Path | None) -> ItemSourc
         # The fixture kind uses no credentials; its file is checked all the same, so the
         # refusal is the same for every kind.
         read_credentials(credentials)
-    fixtures: dict[str, type[FixtureSource]] = {
-        "fixture_mail": FixtureMailSource,
-        "fixture_messenger": FixtureMessengerSource,
-    }
-    if kind in fixtures:
-        is_url = urlsplit(location).scheme in ("http", "https")
-        return fixtures[kind](location if is_url else Path(location))
-    raise SourceError
+    adapter = FIXTURE_SOURCES.get(kind)
+    if adapter is None:
+        raise SourceError
+    is_url = urlsplit(location).scheme in ("http", "https")
+    return adapter(location if is_url else Path(location))
