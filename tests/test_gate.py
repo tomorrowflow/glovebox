@@ -105,6 +105,7 @@ def without_unsynced_account(structured: dict[str, Any] | None) -> dict[str, Any
     assert HANDLE.match(entry.pop("account_handle"))
     assert entry == {
         "source_kind": "fixture_mail",
+        "read_only_enforcement": "gateway",
         "status": "stale",
         "last_sync": None,
         "skipped_items": "0",
@@ -283,7 +284,14 @@ async def test_the_read_tool_returns_only_structured_permitted_fields(
     assert structured["next_cursor"] is None
     assert structured["error"] == "none"
     (sync,) = structured["accounts"]
-    assert set(sync) == {"account_handle", "source_kind", "status", "last_sync", "skipped_items"}
+    assert set(sync) == {
+        "account_handle",
+        "source_kind",
+        "read_only_enforcement",
+        "status",
+        "last_sync",
+        "skipped_items",
+    }
     assert (sync["status"], sync["skipped_items"]) == ("current", "0")
     items = result_items(result)
     # Newest first.

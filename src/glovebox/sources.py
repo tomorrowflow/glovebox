@@ -22,18 +22,24 @@ from pathlib import Path
 from typing import Literal, Protocol, get_args
 from urllib.parse import urlsplit
 
-from glovebox.credentials import read_credentials
+from glovebox import chatdb
+from glovebox.credentials import Secret, read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
-SourceKind = Literal["fixture_mail", "fixture_messenger"]
+SourceKind = Literal["fixture_mail", "fixture_messenger", "imessage"]
+# Who stops a write to the source. `provider`: the access method cannot write at all, so the
+# gate could not write if it tried. `gateway`: the access method could write and the gate has
+# no code path that does (ADR 0003). No source has a provider-enforced read-only access yet.
+ReadOnlyEnforcement = Literal["gateway", "provider"]
 # How fresh and complete an account's data is. `current`: the last sync read the whole
 # source. `incomplete`: it did, but some items could not be understood and are missing.
 # `stale`: the last sync failed, so the data is from an earlier one. `blocked`: the last
 # sync failed because access is not granted.
 SyncStatus = Literal["current", "stale", "incomplete", "blocked"]
 SOURCE_KINDS: tuple[str, ...] = get_args(SourceKind)
-# Kinds whose account must name a credentials file. The fixture kind talks to a
-# stand-in that asks for none.
+READ_ONLY_ENFORCEMENT: dict[str, ReadOnlyEnforcement] = dict.fromkeys(SOURCE_KINDS, "gateway")
+# Kinds whose account must name a credentials file. The fixture kinds and the iMessage
+# source (a local file, or a stand-in that asks for none) need none.
 CREDENTIALS_REQUIRED: frozenset[str] = frozenset()
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
@@ -80,8 +86,9 @@ class SourceMailbox:
 class ItemSource(Protocol):
     kind: SourceKind
 
-    def fetch(self) -> SourceMailbox:
-        """Fetch the account's recent items.
+    def fetch(self, since: datetime) -> SourceMailbox:
+        """Fetch the account's recent items. `since` (UTC) is the start of the retrieval
+        window: a source may leave out anything older, and the gate drops it anyway.
 
         Raises SourceBlocked if access is not granted and SourceError for any other
         failure, never anything with detail.
@@ -89,20 +96,29 @@ class ItemSource(Protocol):
         ...
 
 
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is a failure: a request that carries a credential must not be sent on."""
+
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
 class FixtureSource(ABC):
-    """A fixture document, read from a file or from a stand-in over HTTP, and the way an
+    """A document, read from a file or from a stand-in or bridge over HTTP, and the way an
     unreadable one is told apart from one that refuses access. A subclass names the kind
-    and parses the document."""
+    and parses the document. Over HTTP the one request is a GET of the location, carrying
+    the bearer token if there is one."""
 
     kind: SourceKind
 
-    def __init__(self, location: Path | str) -> None:
+    def __init__(self, location: Path | str, bearer: Secret | None = None) -> None:
         self._location = location
+        self._bearer = bearer
 
     @abstractmethod
     def parse(self, document: object) -> SourceMailbox: ...
 
-    def fetch(self) -> SourceMailbox:
+    def fetch(self, since: datetime) -> SourceMailbox:
         try:
             return self.parse(json.loads(self._read()))
         except SourceError:
@@ -128,8 +144,13 @@ class FixtureSource(ABC):
             with self._location.open("rb") as handle:
                 data = handle.read(MAX_DOCUMENT_BYTES + 1)
         else:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(self._location, timeout=FETCH_TIMEOUT_SECONDS) as response:
+            request = urllib.request.Request(self._location, method="GET")
+            if self._bearer is not None:
+                if not bearer_may_travel(self._location):
+                    raise SourceBlocked
+                request.add_header("Authorization", f"Bearer {self._bearer.reveal()}")
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects)
+            with opener.open(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
                 data = response.read(MAX_DOCUMENT_BYTES + 1)
         if len(data) > MAX_DOCUMENT_BYTES:
             raise SourceError
@@ -165,6 +186,64 @@ class FixtureMessengerSource(FixtureSource):
 
     def parse(self, document: object) -> SourceMailbox:
         return parse_conversations(document)
+
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def bearer_may_travel(location: str) -> bool:
+    """A bridge token goes only over TLS or to this host, never in clear across a network."""
+    parts = urlsplit(location)
+    return parts.scheme == "https" or parts.hostname in LOOPBACK_HOSTS
+
+
+class IMessageSource(FixtureSource):
+    """iMessage conversations, from the Messages database or from a bridge.
+
+    A file location is the Messages database (`chat.db`), read in place and read-only; see
+    `glovebox.chatdb`. An http(s) location is a bridge, such as the test tier's stand-in,
+    that answers a GET with the messenger document of `FixtureMessengerSource`; the account's
+    credentials file, if it has one, holds the bearer token the bridge asks for. Only received
+    messages are items: the operator's own, reactions and system messages are not.
+    """
+
+    kind: SourceKind = "imessage"
+
+    def parse(self, document: object) -> SourceMailbox:
+        return parse_conversations(document)
+
+    def fetch(self, since: datetime) -> SourceMailbox:
+        if isinstance(self._location, Path):
+            return self._read_database(self._location, since)
+        return super().fetch(since)
+
+    def _read_database(self, path: Path, since: datetime) -> SourceMailbox:
+        try:
+            found = chatdb.read_messages(path, since)
+        except chatdb.ChatDbBlocked:
+            raise SourceBlocked from None
+        except chatdb.ChatDbError:
+            raise SourceError from None
+        items: dict[str, SourceItem] = {}
+        skipped = found.skipped
+        for message in found.messages:
+            sender_key = chat_sender_key_of(message.sender)
+            if sender_key is None:
+                skipped += 1
+                continue
+            items.setdefault(
+                message.guid,
+                SourceItem(
+                    upstream_id=message.guid,
+                    sender_key=sender_key,
+                    thread_key=message.chat,
+                    received=message.received.replace(second=0, microsecond=0),
+                    read_status=read_status_of(message.is_read),
+                    has_attachments=message.has_attachments,
+                    text=message.text[:MAX_TEXT_CHARS],
+                ),
+            )
+        return SourceMailbox(account_key="imessage", items=list(items.values()), skipped=skipped)
 
 
 def parse_conversations(document: object) -> SourceMailbox:
@@ -327,7 +406,10 @@ def parse_received(value: object) -> datetime | None:
 FIXTURE_SOURCES: dict[str, type[FixtureSource]] = {
     "fixture_mail": FixtureMailSource,
     "fixture_messenger": FixtureMessengerSource,
+    "imessage": IMessageSource,
 }
+# Kinds that send their credentials, as a bearer token, to the HTTP source they read.
+BEARER_KINDS: frozenset[str] = frozenset({"imessage"})
 
 
 def open_source(kind: str, location: str, credentials: Path | None) -> ItemSource:
@@ -335,12 +417,10 @@ def open_source(kind: str, location: str, credentials: Path | None) -> ItemSourc
 
     Raises CredentialsError, which carries no detail, if the file cannot be used.
     """
-    if credentials is not None:
-        # The fixture kind uses no credentials; its file is checked all the same, so the
-        # refusal is the same for every kind.
-        read_credentials(credentials)
+    secret = read_credentials(credentials) if credentials is not None else None
     adapter = FIXTURE_SOURCES.get(kind)
     if adapter is None:
         raise SourceError
-    is_url = urlsplit(location).scheme in ("http", "https")
-    return adapter(location if is_url else Path(location))
+    if urlsplit(location).scheme in ("http", "https"):
+        return adapter(location, secret if kind in BEARER_KINDS else None)
+    return adapter(Path(location))

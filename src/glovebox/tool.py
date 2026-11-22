@@ -48,7 +48,7 @@ from glovebox.query import (
     query_digest,
 )
 from glovebox.sources import SourceBlocked, SourceError, SyncStatus, open_source
-from glovebox.store import Store
+from glovebox.store import Store, window_start
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +74,9 @@ FILTERS_TEXT = (
 )
 SYNC_FIELDS_TEXT = (
     "Each account carries its sync status (current, stale, incomplete or blocked), its last "
-    "successful sync time at minute precision (none if it never synced) and a capped count "
-    "of skipped items."
+    "successful sync time at minute precision (none if it never synced), a capped count "
+    "of skipped items and who enforces that the source is only read (gateway: the gate has "
+    "no operation that writes; provider: the access method cannot write)."
 )
 SYNC_TEXT = (
     f"{SYNC_FIELDS_TEXT} If an account's source cannot be read, the result is the error "
@@ -275,11 +276,12 @@ class ReadTool:
         with self._sync:
             fetched = []
             failed: list[tuple[Account, SyncStatus]] = []
+            now = self._clock()
             # Every selected account is tried, so the result tells how each one stands.
             for account in selected:
                 try:
                     source = open_source(account.kind, account.source, account.credentials)
-                    fetched.append((account, source.fetch()))
+                    fetched.append((account, source.fetch(window_start(now))))
                 except CredentialsError as error:
                     # The message is fixed text; the account name is the operator's own label.
                     # A credentials file that cannot be used is access that is not granted.
@@ -291,7 +293,6 @@ class ReadTool:
                 except SourceError:
                     logger.warning("account %s sync failed: stale", account.name)
                     failed.append((account, "stale"))
-            now = self._clock()
             for account, mailbox in fetched:
                 # Each item is classified on its own, outside any database transaction;
                 # one that is unchanged since its last classification is not classified

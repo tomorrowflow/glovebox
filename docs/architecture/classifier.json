@@ -22,16 +22,16 @@
   ],
   "evidence": [
     {"id": "config", "file": "src/glovebox/classifier_config.py", "line": 55, "note": "Read once at startup from the operator's JSON file; topic names and descriptions stay here and are never served."},
-    {"id": "tool", "file": "src/glovebox/tool.py", "line": 303, "note": "Reuses a cached classification or classifies the item; one item's failure changes no other."},
+    {"id": "tool", "file": "src/glovebox/tool.py", "line": 304, "note": "Reuses a cached classification or classifies the item; one item's failure changes no other."},
     {"id": "store", "file": "src/glovebox/store.py", "line": 390, "note": "A stored classification is reused only for the same text digest and configuration digest, and never when it was unavailable."},
     {"id": "quarantine", "file": "src/glovebox/classification.py", "line": 88, "note": "The only code that reads the classifier's output: parses it and checks each of the four fields against its closed vocabulary; failures become unknown."},
     {"id": "stub", "file": "src/glovebox/stub.py", "line": 33, "note": "Deterministic stand-in for a model; real inference is a later ticket."},
     {"id": "validator", "file": "src/glovebox/output.py", "line": 146, "note": "The one exit; its schema has no free string, so nothing of the raw output can leave."},
     {"id": "config>quarantine", "file": "src/glovebox/server.py", "line": 32},
-    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 306},
-    {"id": "tool>quarantine", "file": "src/glovebox/tool.py", "line": 303},
+    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 307},
+    {"id": "tool>quarantine", "file": "src/glovebox/tool.py", "line": 304},
     {"id": "quarantine>stub", "file": "src/glovebox/classification.py", "line": 109, "note": "The interface takes the text and the topic list and nothing else."},
     {"id": "stub>quarantine", "file": "src/glovebox/classification.py", "line": 117},
-    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 233}
+    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 234}
   ]
 }

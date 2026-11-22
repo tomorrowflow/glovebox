@@ -1,0 +1,100 @@
+# Source: iMessage
+
+The `imessage` source serves the operator's received iMessages as messenger items: handles and permitted fields only, the rolling 30 days, read-only (ADR 0003, ticket 19). It is implemented and tested against the test tier's HTTP stand-in and a synthetic Messages database. **It has not been run against a real Messages database or a signed-in Mac: that is the operator's acceptance run below, and until it passes production stays parked** (ADR 0003: a stand-in never counts as delivering a source).
+
+## The access method, and why
+
+The gate reads the Mac's own Messages database, `~/Library/Messages/chat.db`, in place and read-only, with Python's standard `sqlite3`. There is no separate bridge process for production: the gate runs as `frogger` on the Mac mini, where Messages is signed in (ADR 0007), so the database is a local file of the gate's own user.
+
+| Option | Verdict |
+|---|---|
+| **Read `chat.db` directly** (chosen) | Needs nothing beyond macOS and a signed-in Messages: no second process, no network hop, no extra credential, and no operation that could send. Read-only is enforced by the gate (below). The cost is that Apple does not document the schema. |
+| A CLI that reads `chat.db` and can also send (for example `imsg`) | Reads the same file, so it adds a process and a text channel between bridge and gate, and it carries a send command the gate would have to promise never to call. Not adopted. |
+| Exporters that write conversations to files (for example `imessage-exporter`) | Would create a raw-message archive on disk, which ADR 0004 rules out. Used only as a reference for the database layout. |
+| BlueBubbles server | A server with a REST API and a write-capable session; it needs the operator to run and update a second product with its own credentials and an open port. Heavier than the problem, and its write operations would be reachable from the gate's host. Not adopted. |
+| Driving Messages with AppleScript or Shortcuts | Can send, needs Automation permission, and cannot list the recent history. Not adopted. |
+| Reimplementations of the iMessage protocol | Hold the Apple ID's credentials and can send; unofficial and fragile. Not adopted. |
+
+**Maintenance state.** The database access itself rests on `sqlite3`, which ships with Python and is as maintained as the interpreter. The part that can break is the layout of Messages' tables, which Apple changes between macOS releases; two changes are already handled: dates became nanoseconds, and from macOS Ventura the text can be left out of `message.text` and kept only in the typed `attributedBody` blob (the reader takes only the string out of it). When a macOS update changes a table or column the reader needs, it fails and the account reports `stale`, never an empty result. **Check the account after every macOS update.** The status of the third-party projects in the table was not re-verified when this was written (the writing session had no network access); re-check them before choosing a different method.
+
+**Device requirements.**
+
+- A Mac signed in to Messages as the operator's Apple ID: the Mac mini, user `frogger`, signed in once in the GUI, with Messages kept running and logged in so that new messages sync (ADR 0007). The production gate is therefore a LaunchAgent in that login session.
+- **Full Disk Access** for the process that opens `chat.db`. macOS grants it per executable: here the gate's own interpreter (`readlink -f ~/glovebox/.venv/bin/python`, a Homebrew path), because the gate opens the file itself. A Homebrew upgrade changes that path and silently revokes the grant, so check it after every upgrade. Without it, opening the file fails and the account is `blocked`.
+- A consequence to accept: the gate's process, not a helper, holds Full Disk Access. It is the process that serves agents, so the interpreter's permission is only as safe as the gate's code. Granting a separate small reader would narrow this, at the price of a second process; it is not done here.
+- The test tier needs none of this: it reads the iMessage stand-in over HTTP, which needs no Messages, no GUI session and no permission.
+
+## What an item is
+
+- Only **received** messages are items. The operator's own messages, reactions (tapbacks), and system messages (group renames, joins) are left out silently.
+- `thread_handle` stands for the conversation (direct or group alike) and `sender_handle` for the sender's phone number or address as Messages records it; the gate turns both into opaque handles. Names, group names, display names, attachment names and types, reactions and every other column are never selected (`chatdb.QUERY`).
+- `read_status` is `read` or `unread` from Messages' own flag; the gate never changes it. Attachment presence is a flag; nothing of the attachment is read.
+- The text goes to the quarantined classifier in memory and nowhere else; the gate stores, logs and serves none of it. A message that cannot be understood (no sender, no conversation, an impossible date) is skipped and counted (`incomplete`), and so is any excess over 50,000 messages in the window.
+- The database is read at every tool call, like every source, and only the window's rows are read.
+
+## Read-only enforcement: gateway-only
+
+Every account entry reports `read_only_enforcement`. For iMessage it is **`gateway`**, not `provider`: the macOS permission that lets the process open the file does not distinguish reading from writing, and the file is writable by its owner, so the access method itself could write. What holds the line is the gate:
+
+- The gate has no write tool and exposes no operation that sends, reacts, deletes or marks read (ADR 0003).
+- `chatdb.open_read_only` opens the file with SQLite `mode=ro`, sets `query_only`, and installs an authorizer that refuses everything except reading, so an `UPDATE`, `ATTACH`, `PRAGMA` or schema change fails inside SQLite even if one were written by mistake. A test attempts each of them.
+- The adapter selects only the columns it maps and never opens the attachments directory.
+- Sending is a different path (Messages itself); the gate never touches it. The gate also marks nothing read: Messages does that when the operator opens a conversation.
+
+If a bridge is used instead of the local file (the stand-in does this), the gate makes one request, `GET` of the configured location, and no other method; a test records every request the stand-in receives and asserts that.
+
+## A separate bridge, if one is ever needed
+
+None is needed today. If the gate is ever moved off the Mac, a bridge on the Mac would serve the messenger document over HTTP (the stand-in's shape: `account`, and `conversations` with `messages`) and the gate would read it as an `imessage` account with an `http(s)` source:
+
+- The gate authenticates with a bearer token from the account's credentials file (`account add --credentials FILE`, mode `0600`, ADR 0004). The token is sent only over `https` or to this host; `account add` refuses a plain-`http` source on another host, and the gate does not send it there. A redirect is a failure and is not followed.
+- The bridge must be reachable only from the gate's host and never by agents; it holds the raw text and a write-capable session (ADR 0005). Agents reach only the gate's MCP endpoint with an agent token.
+- A bridge that refuses the token, or answers 401 or 403, makes the account `blocked`; any other failure makes it `stale`. No upstream text is kept: error text is dropped.
+
+## Local history, and who can read it
+
+- Messages keeps its own history on the Mac, in `~/Library/Messages/chat.db` (with `-wal` and `-shm` files) and received attachments under `~/Library/Messages/Attachments`. `~/Library/Messages` belongs to the user `frogger`, and macOS privacy controls withhold it from any process without Full Disk Access. The acceptance run checks the file modes rather than assuming them.
+- The agents run as other Linux users on other hosts, which reach the gate only over its authenticated HTTP endpoint. They have no account on the Mac mini, so they cannot read these files. The operator verifies this at acceptance (below), and again whenever the Mac's users change.
+- Glovebox stores no raw message text. Its database (`GLOVEBOX_DB`) holds handles, permitted fields, classifications and sync state; the SQLite connection keeps its temporary tables in memory.
+- Messages' own history is the operator's own, outside Glovebox, and follows the operator's Messages settings (including how long it keeps messages).
+
+## The test tier
+
+The seeded iMessage stand-in (`standins:9106`, `GLOVEBOX_STANDIN_IMESSAGE`) serves a fictional conversation at `GET /`. The operator adds it as an account, the way the stack's bootstrap does not:
+
+```sh
+glovebox account add imessage-test --kind imessage --source http://127.0.0.1:9106
+glovebox token issue --account imessage-test --label test-agent
+```
+
+The tests drive it with a real MCP client (`tests/test_imessage.py`): the mapping, freshness and `blocked`, no request but `GET /`, account scope, bearer authentication, cancellation, a gate restart, and a hostile corpus in every field the bridge, a sender or a chat participant controls, including the bridge's error text.
+
+## Acceptance on the Mac mini (operator-only)
+
+Run once at merge, as `frogger`, in the GUI session, **in an isolated gate: a scratch database, another port, and a checkout of your own. Not the shared test tier and not the production install.** Production stays parked until this passes. If device access does not work, record the source as `blocked` with the reason; the ticket then closes as blocked, not as delivered.
+
+1. **Sign-in and permission.** Messages is signed in under `frogger` (open Messages, and check that a conversation loads). Grant Full Disk Access to the real interpreter in System Settings, Privacy & Security: `readlink -f <checkout>/.venv/bin/python`.
+2. **Snapshot what must not change**, read-only (the `sqlite3` you run needs the same permission, or use Terminal with it):
+
+   ```sh
+   sqlite3 -readonly ~/Library/Messages/chat.db \
+     "select count(*) from message where is_from_me = 0 and is_read = 0; \
+      select count(*), coalesce(max(ROWID), 0) from message where is_from_me = 1;"
+   ```
+
+3. **An isolated gate** on a free port, with a scratch database and an account on the real file:
+
+   ```sh
+   export GLOVEBOX_DB=$(mktemp -d)/acceptance.db GLOVEBOX_PORT=18765
+   <checkout>/.venv/bin/glovebox account add imessage --kind imessage --source ~/Library/Messages/chat.db
+   export GLOVEBOX_CHECK_TOKEN=$(<checkout>/.venv/bin/glovebox token issue --account imessage 2>/dev/null)
+   <checkout>/.venv/bin/glovebox serve &
+   ```
+
+4. **Check what crosses the gate:** `<checkout>/.venv/bin/python scripts/imessage_check.py --url http://127.0.0.1:18765/mcp`. Expect `read_only_enforcement: gateway`, status `current`, a recent last sync, and items that carry only handles, minute-precision `received`, `read_status` and `has_attachments`, with no text. Without Full Disk Access the status is `blocked` and the exit status 1: that is the result to record if you cannot grant it.
+5. **A newly received message.** Send yourself a message from another device, run step 4 again: one more item, with a newer `received` time, `unread` unless you opened it, and nothing else about it.
+6. **Nothing changed.** Repeat the two queries of step 2: the unread count has changed only by what you received or read yourself, and the count and highest ROWID of your own messages are the same, so nothing was sent. Do not open the conversation in Messages between step 2 and step 6 (that marks it read).
+7. **Agents cannot read the history.** For each agent user that exists on this Mac: `sudo -u <user> cat ~/Library/Messages/chat.db` fails with `Permission denied`. Agents on other hosts have no account here.
+8. Stop the isolated gate (`kill %1`) and delete the scratch directory.
+
+Record the result on the ticket: delivered (all steps pass), or `blocked` with the step that failed and the reason.
