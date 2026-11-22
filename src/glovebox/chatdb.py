@@ -119,8 +119,10 @@ def open_read_only(path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def read_messages(path: Path, since: datetime) -> ChatMessages:
-    """The received messages at or after `since` (UTC), newest first, at most MAX_MESSAGES."""
-    seconds = (since - APPLE_EPOCH).total_seconds()
+    """The received messages from the minute of `since` (UTC) on, newest first, at most
+    MAX_MESSAGES. The whole first minute is read: the gate keeps its window from the start of
+    that minute, so a cut inside it would drop messages the gate would serve."""
+    seconds = (since.replace(second=0, microsecond=0) - APPLE_EPOCH).total_seconds()
     messages: list[ChatMessage] = []
     skipped = 0
     with open_read_only(path) as database:

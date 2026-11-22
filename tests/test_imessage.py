@@ -760,6 +760,25 @@ async def test_a_gate_restart_over_the_local_database_keeps_the_last_sync(
 
 
 @pytest.mark.anyio
+async def test_the_whole_first_minute_of_the_window_is_read(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    """The store keeps the window from its first minute, so the reader must not cut inside it."""
+    messages_db.receive("early", BOB, "2025-12-11T12:00:10Z")  # in the window's first minute
+    messages_db.receive("before", BOB, "2025-12-11T11:59:50Z")  # the minute before it
+    with start_gate(
+        accounts={"chat": messages_db.path},
+        kinds={"chat": IMESSAGE},
+        now="2026-01-10T12:00:45Z",
+    ) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, LIST_TOOL)
+
+    assert [item["received"] for item in served(result)] == ["2025-12-11T12:00Z"]
+    assert account_of(result)["status"] == "current"
+
+
+@pytest.mark.anyio
 async def test_only_received_messages_are_items(
     start_gate: GateStarter, messages_db: MessagesDb
 ) -> None:
