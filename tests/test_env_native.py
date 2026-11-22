@@ -689,11 +689,40 @@ def test_the_publish_port_is_read_from_the_env_file_like_the_other_knobs(
     assert env.service_plan("gate")[1]["GLOVEBOX_PORT"] == "18765"
 
 
-def test_a_bad_publish_port_in_the_env_file_is_rejected(env: ModuleType, tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text("GLOVEBOX_ENV_PUBLISH_PORT=eighty\n")
+@pytest.mark.parametrize("port", ["eighty", "0", "65536"])
+def test_a_bad_publish_port_in_the_env_file_is_rejected(
+    env: ModuleType, tmp_path: Path, port: str
+) -> None:
+    (tmp_path / ".env").write_text(f"GLOVEBOX_ENV_PUBLISH_PORT={port}\n")
 
     with pytest.raises(SystemExit, match="must be a port number"):
         env.service_plan("gate")
+
+
+def test_an_empty_setting_in_the_env_file_restores_the_default_over_the_process_environment(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", "a.ts.net:8765")
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "18765")
+    (tmp_path / ".env").write_text("GLOVEBOX_ENV_ALLOWED_HOSTS=\nGLOVEBOX_ENV_PUBLISH_PORT=\n")
+
+    _, environment = env.service_plan("gate")
+
+    assert "GLOVEBOX_ALLOWED_HOSTS" not in environment
+    assert environment["GLOVEBOX_PORT"] == "8765"
+
+
+def test_a_commented_out_setting_in_the_env_file_is_not_a_setting(
+    env: ModuleType, tmp_path: Path
+) -> None:
+    token = "GLOVEBOX_TEST_TOKEN=abc123\n"
+    (tmp_path / ".env").write_text(token)
+    plain = env.release_fingerprint()
+
+    (tmp_path / ".env").write_text("# GLOVEBOX_ENV_ALLOWED_HOSTS=\n" + token)
+
+    assert env.release_fingerprint() == plain
+    assert "# GLOVEBOX_ENV_ALLOWED_HOSTS" not in env.read_env_file(keep_empty=True)
 
 
 def test_the_release_does_not_carry_the_settings_in_the_clear(

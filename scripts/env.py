@@ -160,7 +160,7 @@ def read_env_file(keep_empty: bool = False) -> dict[str, str]:
         lines = ENV_FILE.read_text().splitlines()
     except (OSError, ValueError):  # missing, unreadable, or not text
         return {}
-    pairs = (line.partition("=") for line in lines)
+    pairs = (line.partition("=") for line in lines if not line.lstrip().startswith("#"))
     return {key: value for key, separator, value in pairs if separator and (value or keep_empty)}
 
 
@@ -226,7 +226,7 @@ def run_command(
 def native_gate_port(env: Mapping[str, str]) -> int:
     """The gate's port, from the same environment as its address and allowed hosts."""
     raw = env.get("GLOVEBOX_ENV_PUBLISH_PORT", str(GATE_PORT))
-    if not raw.isdecimal() or int(raw) > 65535:
+    if not raw.isdecimal() or not 0 < int(raw) <= 65535:
         raise SystemExit("GLOVEBOX_ENV_PUBLISH_PORT must be a port number")
     return int(raw)
 
@@ -235,9 +235,12 @@ def native_env() -> dict[str, str]:
     """The environment the native services get: the process's, overridden by the env file.
 
     The launchd daemons only have what their plists give them, so the env file is where
-    the operator sets the knobs that need no new bootstrap.
+    the operator sets the knobs that need no new bootstrap. A line with an empty value
+    clears the setting, even one the process environment has: the default applies again.
     """
-    return {**os.environ, **read_env_file()}
+    cleared = {name for name, value in read_env_file(keep_empty=True).items() if not value}
+    environment = {**os.environ, **read_env_file()}
+    return {name: value for name, value in environment.items() if name not in cleared}
 
 
 def native_publish_host(env: Mapping[str, str]) -> str:
