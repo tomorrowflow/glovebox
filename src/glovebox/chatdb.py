@@ -53,11 +53,15 @@ where coalesce(m.is_from_me, 0) = 0
   and coalesce(m.associated_message_type, 0)
     not between {FIRST_REACTION_TYPE} and {LAST_REACTION_TYPE}
   and {SECONDS_OF_DATE} >= ?
+  and {SECONDS_OF_DATE} < ?
 order by m.date desc
 limit ?
 """
 
-NEWEST_QUERY = f"select max({SECONDS_OF_DATE}) from message m"
+# Both queries stop before the end of the minute of `now`, where the gate's window ends: a
+# row dated later (a device clock that was ahead) is neither served nor a sign of life, and
+# must not use up the row cap.
+NEWEST_QUERY = f"select max({SECONDS_OF_DATE}) from message m where {SECONDS_OF_DATE} < ?"
 
 _ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
@@ -128,19 +132,24 @@ def open_read_only(path: Path) -> Iterator[sqlite3.Connection]:
 def read_messages(
     path: Path, since: datetime, *, now: datetime, max_silence: timedelta | None
 ) -> ChatMessages:
-    """The received messages from the minute of `since` (UTC) on, newest first, at most
-    MAX_MESSAGES. The whole first minute is read: the gate keeps its window from the start of
-    that minute, so a cut inside it would drop messages the gate would serve.
+    """The received messages from the minute of `since` to the end of the minute of `now`
+    (UTC), newest first, at most MAX_MESSAGES. Both whole minutes are read: the gate keeps its
+    window from the start of the first to the end of the last, so a cut inside either would
+    drop messages the gate would serve.
 
     Raises ChatDbSilent if `max_silence` is set and the database shows no activity of any
-    kind (a message of either direction, a reaction) in that long before `now`.
+    kind (a message of either direction, a reaction) in that long before `now`. Rows dated
+    after the minute of `now` count for nothing.
     """
     seconds = (since.replace(second=0, microsecond=0) - APPLE_EPOCH).total_seconds()
+    until = (
+        now.replace(second=0, microsecond=0) + timedelta(minutes=1) - APPLE_EPOCH
+    ).total_seconds()
     messages: list[ChatMessage] = []
     skipped = 0
     with open_read_only(path) as database:
-        rows = database.execute(QUERY, (seconds, MAX_MESSAGES)).fetchall()
-        newest = database.execute(NEWEST_QUERY).fetchone()[0]
+        rows = database.execute(QUERY, (seconds, until, MAX_MESSAGES)).fetchall()
+        newest = database.execute(NEWEST_QUERY, (until,)).fetchone()[0]
     if max_silence is not None:
         # A readable file proves only that it can be opened. Messages that stops syncing
         # leaves it readable, so an account with no sign of life is not `current`.

@@ -937,6 +937,43 @@ async def test_a_database_that_has_gone_quiet_is_stale_until_something_arrives(
 
 
 @pytest.mark.anyio
+async def test_a_row_dated_in_the_future_does_not_keep_a_silent_database_alive(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    """A message recorded while the device clock was ahead is no sign of recent activity."""
+    messages_db.receive("old", BOB, "2026-01-02T12:00:00Z")
+    messages_db.receive("ahead", BOB, "2026-02-20T12:00:00Z")
+    with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, LIST_TOOL)
+
+    assert result["error"] == "source_unavailable" and result["items"] == []
+    assert account_of(result)["status"] == "stale"
+
+
+@pytest.mark.anyio
+async def test_activity_later_in_the_current_minute_counts_and_is_served(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    """The store serves the whole minute of `now`, so the reader reads it all too."""
+    messages_db.receive("old", BOB, "2026-01-02T12:00:00Z")
+    messages_db.receive("later", BOB, "2026-01-10T12:00:50Z")
+    with start_gate(
+        accounts={"chat": messages_db.path},
+        kinds={"chat": IMESSAGE},
+        now="2026-01-10T12:00:10Z",
+    ) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, LIST_TOOL)
+
+    assert account_of(result)["status"] == "current"
+    assert [item["received"] for item in served(result)] == [
+        "2026-01-10T12:00Z",
+        "2026-01-02T12:00Z",
+    ]
+
+
+@pytest.mark.anyio
 async def test_any_activity_in_the_database_counts_as_alive(
     start_gate: GateStarter, messages_db: MessagesDb
 ) -> None:
@@ -1175,6 +1212,23 @@ def test_more_messages_than_the_cap_are_reported_as_missing(
 
     assert [message.guid for message in mailbox.messages] == ["g4", "g3", "g2"]
     assert mailbox.skipped == 2
+
+
+def test_rows_dated_in_the_future_do_not_use_up_the_cap(
+    messages_db: MessagesDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for number in range(3):
+        messages_db.receive(f"g{number}", BOB, f"2026-01-05T18:0{number}:00Z")
+    for number in range(4):
+        messages_db.receive(f"ahead{number}", BOB, f"2026-03-0{number + 1}T18:00:00Z")
+    monkeypatch.setattr(chatdb, "MAX_MESSAGES", 3)
+
+    mailbox = chatdb.read_messages(
+        messages_db.path, NOW - timedelta(days=30), now=NOW, max_silence=None
+    )
+
+    assert [message.guid for message in mailbox.messages] == ["g2", "g1", "g0"]
+    assert mailbox.skipped == 0
 
 
 def test_names_filenames_and_types_are_not_selected_at_all() -> None:
