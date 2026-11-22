@@ -19,7 +19,14 @@ from typing import Any
 import httpx2
 import pytest
 
-from tests.client import ACCOUNTS_TOOL, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent_client
+from tests.client import (
+    ACCOUNTS_TOOL,
+    COUNT_TOOL,
+    GROUP_TOOL,
+    LIST_TOOL,
+    TOPICS_TOOL,
+    agent_client,
+)
 from tests.conftest import (
     DEFAULT_ACCOUNT,
     GateStarter,
@@ -392,7 +399,7 @@ async def test_nothing_of_the_operators_setup_is_reachable_through_mcp(
             operator(gate.db, "token", "list").stdout,
         )
 
-    assert names == [ACCOUNTS_TOOL, LIST_TOOL, COUNT_TOOL, GROUP_TOOL]
+    assert names == [ACCOUNTS_TOOL, LIST_TOOL, COUNT_TOOL, GROUP_TOOL, TOPICS_TOOL]
     assert before == after
 
 
@@ -498,7 +505,7 @@ def test_a_token_value_is_shown_once_and_the_database_holds_no_usable_copy(
         assert value not in listing.stdout + listing.stderr
     record = operator(db, "token", "list").stdout.strip().split("\t")
     assert record[1] == "active" and record[3] == "work" and record[5] == "agent-one"
-    assert record[4] == "list_accounts,list_items,count_items,group_items"
+    assert record[4] == "list_accounts,list_items,count_items,group_items,list_topics"
     # Below the seam on purpose: the stored files hold the verifier, not the value, and the
     # verifier is not itself a token.
     files = storage_files(db)

@@ -20,6 +20,7 @@ from tests.client import (
     COUNT_TOOL,
     GROUP_TOOL,
     LIST_TOOL,
+    TOPICS_TOOL,
     agent_client,
 )
 from tests.conftest import RunningGate
@@ -143,6 +144,12 @@ FILTER_PARAMETERS = (
     "sender_handle",
     "thread_handle",
     "account_handle",
+    "topic",
+    "reply_needed",
+    "action_requested",
+    "deadline_from",
+    "deadline_to",
+    "classification_status",
 )
 
 # One well-formed call of each tool, with every filter unset.
@@ -151,6 +158,7 @@ OK_CALLS: dict[str, dict[str, object]] = {
     LIST_TOOL: {},
     COUNT_TOOL: {},
     GROUP_TOOL: {"group_by": "sender_handle"},
+    TOPICS_TOOL: {},
 }
 
 
@@ -161,8 +169,8 @@ def hostile_calls() -> dict[str, tuple[str, dict[str, object]]]:
     """
     calls: dict[str, tuple[str, dict[str, object]]] = {}
     for tool, base in OK_CALLS.items():
-        # The accounts tool takes no parameter at all.
-        parameters = [] if tool == ACCOUNTS_TOOL else [*FILTER_PARAMETERS]
+        # The accounts and topics tools take no parameter at all.
+        parameters = [] if tool in (ACCOUNTS_TOOL, TOPICS_TOOL) else [*FILTER_PARAMETERS]
         if tool in (LIST_TOOL, GROUP_TOOL):
             parameters += ["limit", "cursor"]
         parameters += {LIST_TOOL: ["sort"], GROUP_TOOL: ["group_by"]}.get(tool, [])

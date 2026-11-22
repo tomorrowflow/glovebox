@@ -51,6 +51,11 @@ ITEM_FIELDS = {
     "received",
     "read_status",
     "has_attachments",
+    "topic",
+    "reply_needed",
+    "action_requested",
+    "deadline",
+    "classification_status",
 }
 
 

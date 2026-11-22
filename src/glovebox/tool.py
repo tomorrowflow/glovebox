@@ -16,10 +16,13 @@ from glovebox.access import (
     GROUP_OPERATION,
     LIST_ACCOUNTS_OPERATION,
     LIST_OPERATION,
+    LIST_TOPICS_OPERATION,
     Access,
     Account,
     Grant,
 )
+from glovebox.classification import QuarantinedClassifier
+from glovebox.classifier_config import ClassifierConfig
 from glovebox.credentials import CredentialsError
 from glovebox.formats import MAX_ITEMS
 from glovebox.output import (
@@ -28,6 +31,7 @@ from glovebox.output import (
     GroupOutput,
     ListOutput,
     Output,
+    TopicsOutput,
     error_result,
     release,
     success_result,
@@ -38,6 +42,7 @@ from glovebox.query import (
     Filters,
     GroupInput,
     ListInput,
+    TopicsInput,
     decode_cursor,
     encode_cursor,
     query_digest,
@@ -52,6 +57,7 @@ ACCOUNTS_TOOL = LIST_ACCOUNTS_OPERATION
 LIST_TOOL = LIST_OPERATION
 COUNT_TOOL = COUNT_OPERATION
 GROUP_TOOL = GROUP_OPERATION
+TOPICS_TOOL = LIST_TOPICS_OPERATION
 
 READ_ONLY = types.ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -59,8 +65,11 @@ READ_ONLY = types.ToolAnnotations(
 
 FILTERS_TEXT = (
     "Filters, all optional and combined with AND: read status, received-time range "
-    "(inclusive, minute precision), attachment presence, sender handle, thread handle "
-    "and account handle."
+    "(inclusive, minute precision), attachment presence, sender handle, thread handle, "
+    "account handle and the semantic fields: topic ID, reply needed, action requested, "
+    "deadline range and classification status. Semantic fields are untrusted judgments "
+    "of a quarantined classifier, `unknown` whenever the gate cannot validate one, and "
+    "never an authorization for an action."
 )
 SYNC_FIELDS_TEXT = (
     "Each account carries its sync status (current, stale, incomplete or blocked), its last "
@@ -112,7 +121,8 @@ SPECS: dict[str, ToolSpec] = {
             LIST_TOOL,
             "Lists mail items of the last 30 days with permitted fields only: item handle, "
             "account handle, source kind, sender handle, thread handle, received time at "
-            "minute precision, read status and attachment presence. "
+            "minute precision, read status, attachment presence and the semantic fields "
+            "topic, reply needed, action requested, deadline and classification status. "
             f"{FILTERS_TEXT} Fixed sort orders only: received_desc, received_asc, "
             f"unread_first, attachments_first. At most {MAX_ITEMS} items per page; "
             "next_cursor is an opaque cursor for the next page, valid only for the same "
@@ -138,7 +148,8 @@ SPECS: dict[str, ToolSpec] = {
         _definition(
             GROUP_TOOL,
             "Counts the mail items of the last 30 days that match the filters, grouped by "
-            "sender handle, thread handle, read status or source kind. Largest groups first. "
+            "sender handle, thread handle, read status, source kind, topic, reply needed, "
+            "action requested, deadline or classification status. Largest groups first. "
             f"{FILTERS_TEXT} A count above 1000 is reported as 1000+. At most {MAX_ITEMS} "
             "groups per page; next_cursor is an opaque cursor for the next page, valid only "
             f"for the same caller and query. {SYNC_TEXT}",
@@ -148,14 +159,36 @@ SPECS: dict[str, ToolSpec] = {
         GroupInput,
         GroupOutput,
     ),
+    TOPICS_TOOL: ToolSpec(
+        _definition(
+            TOPICS_TOOL,
+            "Lists the configured topic IDs, the vocabulary of the topic filter "
+            "and group. Besides these, an item's topic can be `other` or `unknown`. Topic "
+            "names and descriptions are never returned.",
+            TopicsInput,
+            TopicsOutput,
+        ),
+        TopicsInput,
+        TopicsOutput,
+    ),
 }
 
 
 class ReadTool:
-    def __init__(self, store: Store, access: Access, clock: Callable[[], datetime]) -> None:
+    def __init__(
+        self,
+        store: Store,
+        access: Access,
+        clock: Callable[[], datetime],
+        classifier: QuarantinedClassifier,
+        config: ClassifierConfig,
+    ) -> None:
         self._store = store
         self._access = access
         self._clock = clock
+        self._classifier = classifier
+        self._topic_ids = [topic.id for topic in config.topics]
+        self._config_digest = config.digest()
         self._sync = threading.Lock()
 
     async def definitions(self, principal: str | None) -> list[types.Tool]:
@@ -206,6 +239,8 @@ class ReadTool:
         except ValidationError:
             # The message of a validation error quotes the input, so it is dropped.
             return error_result("invalid_arguments", spec.output)
+        if isinstance(request, TopicsInput):
+            return success_result({"topics": self._topic_ids})
         if isinstance(request, AccountsInput):
             handles = [account.handle for account in grant.accounts]
             return success_result({"accounts": self._store.account_sync(handles)})
@@ -253,7 +288,19 @@ class ReadTool:
                     failed.append((account, "stale"))
             now = self._clock()
             for account, mailbox in fetched:
-                self._store.replace_mailbox(account.handle, account.kind, mailbox, now)
+                # Each item is classified on its own, outside any database transaction;
+                # one that is unchanged since its last classification is not classified
+                # again.
+                prepared = self._store.prepare_mailbox(
+                    account.handle, mailbox, now, self._config_digest
+                )
+                classifications = [
+                    item.cached or self._classifier.classify(item.item.text, now)
+                    for item in prepared.items
+                ]
+                self._store.commit_mailbox(
+                    account.kind, prepared, classifications, self._config_digest, now
+                )
             for account, status in failed:
                 self._store.mark_unsynced(account.handle, account.kind, status)
             handles = [account.handle for account in selected]

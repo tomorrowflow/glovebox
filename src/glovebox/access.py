@@ -27,8 +27,15 @@ LIST_ACCOUNTS_OPERATION = "list_accounts"
 LIST_OPERATION = "list_items"
 COUNT_OPERATION = "count_items"
 GROUP_OPERATION = "group_items"
+LIST_TOPICS_OPERATION = "list_topics"
 # The read operations a token can be limited to; one name per read tool.
-OPERATIONS = (LIST_ACCOUNTS_OPERATION, LIST_OPERATION, COUNT_OPERATION, GROUP_OPERATION)
+OPERATIONS = (
+    LIST_ACCOUNTS_OPERATION,
+    LIST_OPERATION,
+    COUNT_OPERATION,
+    GROUP_OPERATION,
+    LIST_TOPICS_OPERATION,
+)
 
 ACCOUNT_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 LABEL = re.compile(r"[A-Za-z0-9 ._-]{0,64}")

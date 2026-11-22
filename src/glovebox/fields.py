@@ -5,7 +5,7 @@ page cursor, with a fixed length and an anchored pattern.
 """
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import AfterValidator, StringConstraints
 
@@ -21,6 +21,8 @@ from glovebox.formats import (
     MINUTE_PATTERN,
     SKIPPED_MAX_LENGTH,
     SKIPPED_PATTERN,
+    TOPIC_ID_MAX_LENGTH,
+    TOPIC_ID_PATTERN,
 )
 
 
@@ -38,6 +40,14 @@ Minute = Annotated[
     StringConstraints(pattern=MINUTE_PATTERN, min_length=MINUTE_LENGTH, max_length=MINUTE_LENGTH),
     AfterValidator(_is_a_minute),
 ]
+TopicId = Annotated[
+    str, StringConstraints(pattern=TOPIC_ID_PATTERN, min_length=1, max_length=TOPIC_ID_MAX_LENGTH)
+]
+YesNoUnknown = Literal["yes", "no", "unknown"]
+# How far a classification got: every field valid, some valid, none valid, or no answer.
+ClassificationStatus = Literal["classified", "partial", "invalid", "unavailable"]
+# A deadline is a minute timestamp, or `unknown`.
+Deadline = Minute | Literal["unknown"]
 # "0" to "1000", or "1000+" for anything above the cap.
 Count = Annotated[
     str, StringConstraints(pattern=COUNT_PATTERN, min_length=1, max_length=COUNT_MAX_LENGTH)

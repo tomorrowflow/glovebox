@@ -697,6 +697,14 @@ async def test_inputs_are_closed_and_there_is_no_text_or_semantic_query(
                 "sender_handle",
                 "thread_handle",
                 "account_handle",
+                # The semantic fields are closed vocabularies too: filtering on one is not
+                # a text query.
+                "topic",
+                "reply_needed",
+                "action_requested",
+                "deadline_from",
+                "deadline_to",
+                "classification_status",
             }
             assert set(tools[COUNT_TOOL].input_schema["properties"]) == filters
             assert set(tools[LIST_TOOL].input_schema["properties"]) == filters | {
