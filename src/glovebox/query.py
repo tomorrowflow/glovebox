@@ -40,6 +40,12 @@ OFFSET_BYTES = 4
 MAC_BYTES = 16
 
 
+class AccountsInput(BaseModel):
+    """Listing accounts takes no input."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
 class Filters(BaseModel):
     """Every filter is optional; the ones given are combined with AND. Ranges are inclusive."""
 

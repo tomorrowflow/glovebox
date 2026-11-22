@@ -5,35 +5,28 @@ handle registry therefore does not keep upstream IDs, sender addresses or thread
 keys: it keeps a keyed digest of each, with a key that exists only in this
 database, which is enough to give the same upstream entity the same handle again.
 Handles themselves come from randomness and have no relation to what they stand for.
+The same goes for the cache of classifications: an item's text is kept only as a keyed
+digest, enough to tell that it changed.
 """
 
 import hashlib
 import hmac
-import os
 import secrets
 import sqlite3
-from collections.abc import Iterator, Sequence
-from contextlib import closing, contextmanager
+from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, get_args
 
+from glovebox import db
 from glovebox.classification import UNKNOWN, Classification
+from glovebox.db import MINT_ATTEMPTS, new_handle
 from glovebox.fields import ClassificationStatus
-from glovebox.formats import (
-    COUNT_CAP,
-    COUNT_CAPPED,
-    HANDLE_ALPHABET,
-    HANDLE_LENGTH,
-    WINDOW_DAYS,
-    minute,
-)
+from glovebox.formats import COUNT_CAP, COUNT_CAPPED, WINDOW_DAYS, minute
 from glovebox.query import Filters, GroupBy, SortOrder
-from glovebox.sources import SourceItem, SourceKind, SourceMailbox
-
-BUSY_TIMEOUT_SECONDS = 30
-MINT_ATTEMPTS = 16
+from glovebox.sources import SourceItem, SourceMailbox
 
 # The fixed sort orders, each ending in the item handle so that a page boundary is stable.
 SORT_ORDERS: dict[SortOrder, str] = {
@@ -63,43 +56,6 @@ ITEM_COLUMN_COUNT = 15  # the columns of the items table, in the order it declar
 # The columns of an item row that the classifier decides, with its status.
 SEMANTIC_COLUMNS = "topic, reply_needed, action_requested, deadline, classification_status"
 
-SCHEMA = """
-create table if not exists meta (
-    key text primary key,
-    value text not null
-);
-create table if not exists handles (
-    handle text primary key,
-    kind text not null,
-    digest text not null,
-    unique (kind, digest)
-);
-create table if not exists items (
-    item_handle text primary key,
-    account_handle text not null,
-    source_kind text not null,
-    sender_handle text not null,
-    thread_handle text not null,
-    received text not null,
-    read_status text not null,
-    has_attachments integer not null,
-    topic text not null,
-    reply_needed text not null,
-    action_requested text not null,
-    deadline text,
-    classification_status text not null,
-    content_digest text not null,
-    config_digest text not null
-);
-create index if not exists items_by_received on items (received desc, item_handle);
-create table if not exists sync_state (
-    account_handle text primary key,
-    source_kind text not null,
-    status text not null,
-    last_sync text not null
-);
-"""
-
 
 @dataclass(frozen=True)
 class PreparedItem:
@@ -118,19 +74,10 @@ class PreparedMailbox:
     items: list[PreparedItem]
 
 
-def new_handle() -> str:
-    return "".join(secrets.choice(HANDLE_ALPHABET) for _ in range(HANDLE_LENGTH))
-
-
 class Store:
     def __init__(self, path: Path) -> None:
         self._path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # The file is private to the gateway's user before anything is written to it.
-        os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
-        with closing(sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)) as database:
-            _drop_items_without_semantic_fields(database)
-            database.executescript(SCHEMA)
+        db.prepare(path)
         with self._transaction() as database:
             for name in ("handle_key", "cursor_key", "content_key"):
                 database.execute(
@@ -138,27 +85,19 @@ class Store:
                     (name, secrets.token_hex(32)),
                 )
 
-    @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
-        """One write-locked transaction, so two callers never mint a handle twice."""
-        with closing(
-            sqlite3.connect(self._path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
-        ) as database:
-            database.execute("begin immediate")
-            try:
-                yield database
-            except BaseException:
-                database.execute("rollback")
-                raise
-            database.execute("commit")
+    def _transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        return db.transaction(self._path)
+
+    def _reader(self) -> AbstractContextManager[sqlite3.Connection]:
+        return db.reader(self._path)
 
     def cursor_key(self) -> bytes:
         """The key page cursors are signed with. It never leaves this database."""
-        with closing(sqlite3.connect(self._path, timeout=BUSY_TIMEOUT_SECONDS)) as database:
+        with self._reader() as database:
             return _meta_key(database, "cursor_key")
 
     def prepare_mailbox(
-        self, mailbox: SourceMailbox, synced_at: datetime, config_digest: str
+        self, account: str, mailbox: SourceMailbox, synced_at: datetime, config_digest: str
     ) -> PreparedMailbox:
         """Give each in-window item its handle and find which classifications can be reused.
 
@@ -166,12 +105,15 @@ class Store:
         classification is reusable when the item's text and the classifier configuration
         (`config_digest`) are what they were when it was made, and it was an answer: an
         `unavailable` one is tried again. Nothing is changed here but the handle registry.
+        An account the operator removed in the meantime has no items to prepare.
         """
         window_start, window_end = window(synced_at)
         with self._transaction() as database:
+            known = database.execute("select 1 from accounts where handle = ?", (account,))
+            if known.fetchone() is None:
+                return PreparedMailbox(account, [])
             key = _meta_key(database, "handle_key")
             content_key = _meta_key(database, "content_key")
-            account = _handle(database, key, "account", "", mailbox.account_key)
             stored = {
                 row[0]: row
                 for row in database.execute(
@@ -195,20 +137,24 @@ class Store:
 
     def commit_mailbox(
         self,
-        kind: SourceKind,
+        kind: str,
         prepared: PreparedMailbox,
         classifications: Sequence[Classification],
         config_digest: str,
         synced_at: datetime,
-    ) -> str:
+    ) -> None:
         """Make the account's stored items match one complete fetch, in one transaction.
 
         `classifications` holds one entry per prepared item, in order. Items of any
-        account that have left the window are dropped. Returns the account's handle.
+        account that have left the window are dropped. An account the operator removed in
+        the meantime is not written to.
         """
         window_start, _ = window(synced_at)
         account = prepared.account
         with self._transaction() as database:
+            known = database.execute("select 1 from accounts where handle = ?", (account,))
+            if known.fetchone() is None:
+                return
             key = _meta_key(database, "handle_key")
             database.execute("delete from items where account_handle = ?", (account,))
             database.execute("delete from items where received < ?", (window_start,))
@@ -238,24 +184,22 @@ class Store:
                 "insert or replace into sync_state values (?, ?, 'current', ?)",
                 (account, kind, minute(synced_at)),
             )
-        return account
 
     def list_items(
         self,
-        account: str,
+        accounts: Sequence[str],
         now: datetime,
         filters: Filters,
         order: SortOrder,
         limit: int,
         offset: int,
     ) -> list[dict[str, Any]]:
-        """One page of the account's items inside the window, as stored.
+        """One page of the items of `accounts` inside the window, as stored.
 
         Nothing here vouches for the values. Items of any other account in the
-        database, such as one the source served before it was reconfigured, are not
-        served.
+        database are not served.
         """
-        where, parameters = _where(account, now, filters)
+        where, parameters = _where(accounts, now, filters)
         with self._reader() as database:
             rows = database.execute(
                 "select item_handle, account_handle, source_kind, sender_handle, thread_handle,"
@@ -284,9 +228,9 @@ class Store:
             for row in rows
         ]
 
-    def count_items(self, account: str, now: datetime, filters: Filters) -> str:
+    def count_items(self, accounts: Sequence[str], now: datetime, filters: Filters) -> str:
         """How many items match, as the response spells it: capped at `1000+`."""
-        where, parameters = _where(account, now, filters)
+        where, parameters = _where(accounts, now, filters)
         with self._reader() as database:
             # Counting stops one past the cap: no more is ever reported.
             (count,) = database.execute(
@@ -297,7 +241,7 @@ class Store:
 
     def group_items(
         self,
-        account: str,
+        accounts: Sequence[str],
         now: datetime,
         filters: Filters,
         group_by: GroupBy,
@@ -309,7 +253,7 @@ class Store:
         Groups are ordered by the count as reported, so the order says nothing about
         sizes above the cap.
         """
-        where, parameters = _where(account, now, filters)
+        where, parameters = _where(accounts, now, filters)
         column = GROUP_COLUMNS[group_by]
         with self._reader() as database:
             rows = database.execute(
@@ -323,11 +267,6 @@ class Store:
             for row in rows
         ]
 
-    @contextmanager
-    def _reader(self) -> Iterator[sqlite3.Connection]:
-        with closing(sqlite3.connect(self._path, timeout=BUSY_TIMEOUT_SECONDS)) as database:
-            yield database
-
 
 def spell_count(count: int) -> str:
     return COUNT_CAPPED if count > COUNT_CAP else str(count)
@@ -338,14 +277,17 @@ def window(now: datetime) -> tuple[str, str]:
     return minute(now - timedelta(days=WINDOW_DAYS)), minute(now)
 
 
-def _where(account: str, now: datetime, filters: Filters) -> tuple[str, list[object]]:
+def _where(accounts: Sequence[str], now: datetime, filters: Filters) -> tuple[str, list[object]]:
     """The conditions of one query, with their parameters.
 
     Column names come from this module, never from input; every value is a parameter.
+    The caller has already narrowed `accounts` by the account handle filter, so that
+    filter is not applied again here.
     """
     start, end = window(now)
-    conditions = ["account_handle = ?", "received >= ?", "received <= ?"]
-    parameters: list[object] = [account, start, end]
+    marks = ", ".join("?" for _ in accounts)
+    conditions = [f"account_handle in ({marks})", "received >= ?", "received <= ?"]
+    parameters: list[object] = [*accounts, start, end]
     optional: list[tuple[str, object]] = [
         ("read_status = ?", filters.read_status),
         ("received >= ?", filters.received_from),
@@ -356,7 +298,6 @@ def _where(account: str, now: datetime, filters: Filters) -> tuple[str, list[obj
         ),
         ("sender_handle = ?", filters.sender_handle),
         ("thread_handle = ?", filters.thread_handle),
-        ("account_handle = ?", filters.account_handle),
         ("topic = ?", filters.topic),
         ("reply_needed = ?", filters.reply_needed),
         ("action_requested = ?", filters.action_requested),
@@ -370,14 +311,6 @@ def _where(account: str, now: datetime, filters: Filters) -> tuple[str, list[obj
             conditions.append(condition)
             parameters.append(value)
     return " and ".join(conditions), parameters
-
-
-def _drop_items_without_semantic_fields(database: sqlite3.Connection) -> None:
-    """Items are a copy of what the source serves, rebuilt on every call, so a table from
-    before the semantic fields is dropped rather than migrated."""
-    columns = {row[1] for row in database.execute("pragma table_info(items)")}
-    if columns and "classification_status" not in columns:
-        database.execute("drop table items")
 
 
 def _content_digest(key: bytes, text: str) -> str:

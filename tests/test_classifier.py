@@ -12,7 +12,6 @@ import dataclasses
 import hashlib
 import inspect
 import json
-import os
 import sqlite3
 import subprocess
 import sys
@@ -35,7 +34,7 @@ from glovebox.classification import (
 from glovebox.classifier_config import parse_classifier_config
 from glovebox.config import ConfigError
 from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, TOPICS_TOOL, agent_client
-from tests.conftest import AGENT_TOKEN, GateStarter, RunningGate
+from tests.conftest import GateStarter, RunningGate, clean_environment, operator
 from tests.hostile import CORPUS, assert_no_corpus, hostile_mail_fixture, observe_gate
 from tests.schema import closed_schema_problems
 from tests.test_gate import counting_source, storage_files, write_fixture
@@ -164,7 +163,7 @@ async def test_topic_ids_are_listed_and_items_carry_validated_semantic_fields(
     setup.rule("marker-one", GOOD)
     fixture = write_fixture(tmp_path / "mail.json", mailbox(message("m1", "marker-one")))
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             topics = await client.call_tool(TOPICS_TOOL, {})
             tools = (await client.list_tools()).tools
@@ -190,6 +189,28 @@ async def test_topic_ids_are_listed_and_items_carry_validated_semantic_fields(
 async def test_the_topic_list_is_empty_when_none_is_configured(gate: RunningGate) -> None:
     async with agent_client(gate) as client:
         assert await call(client, TOPICS_TOOL) == {"error": "none", "topics": []}
+
+
+@pytest.mark.anyio
+async def test_the_topic_tool_is_offered_only_to_tokens_whose_operations_name_it(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    setup = Setup(tmp_path)
+    fixture = write_fixture(tmp_path / "mail.json", mailbox(message("m1", "body", 1)))
+
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
+        issued = operator(
+            gate.db, "token", "issue", "--account", "fixture", "--operation", "count_items"
+        )
+        assert issued.returncode == 0, issued.stderr
+        async with agent_client(gate, token=issued.stdout.strip()) as client:
+            names = [tool.name for tool in (await client.list_tools()).tools]
+            hidden = await client.call_tool(TOPICS_TOOL, {})
+            nonexistent = await client.call_tool("no_such_tool", {})
+
+    assert names == [COUNT_TOOL]
+    assert hidden.structured_content == {"error": "unknown_tool"}
+    assert hidden.model_dump_json() == nonexistent.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -228,15 +249,9 @@ def test_the_service_refuses_to_start_with_an_unusable_classifier_configuration(
 ) -> None:
     config = tmp_path / "classifier.json"
     config.write_text(json.dumps({"topics": [{"id": CORPUS["injection"], "name": "n"}]}))
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GLOVEBOX_")}
-    env.update(
-        GLOVEBOX_DB=str(tmp_path / "glovebox.db"),
-        GLOVEBOX_AGENT_TOKEN=AGENT_TOKEN,
-        GLOVEBOX_CLASSIFIER_CONFIG=str(config),
-    )
     result = subprocess.run(
         [sys.executable, "-m", "glovebox"],
-        env=env,
+        env=clean_environment(tmp_path / "glovebox.db", GLOVEBOX_CLASSIFIER_CONFIG=str(config)),
         capture_output=True,
         text=True,
         timeout=30,
@@ -350,7 +365,7 @@ async def test_each_invalid_field_becomes_unknown_and_valid_fields_beside_it_are
         messages.append(message(case, f"case-{case}-end", minute=index))
     fixture = write_fixture(tmp_path / "mail.json", mailbox(*messages))
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             items = await list_items(client)
             counts = await call(client, GROUP_TOOL, group_by="classification_status")
@@ -384,7 +399,7 @@ async def test_an_item_the_classifier_cannot_answer_is_unknown_and_unavailable_b
         ),
     )
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             down, good, crashed = await list_items(client)
             counted = await call(client, COUNT_TOOL, read_status="unknown")
@@ -426,7 +441,7 @@ async def test_a_classifier_that_fails_with_the_items_text_leaks_it_nowhere(
         tmp_path / "mail.json", mailbox(message("m1", CORPUS["marker"], 1), message("m2", "ok", 2))
     )
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             items = await list_items(client)
             channels = {"items": json.dumps(items)}
@@ -451,7 +466,7 @@ async def test_the_classifier_receives_one_items_text_and_the_topic_list_and_not
         mailbox(message("m1", "first body", 1), message("m2", "second body", 2)),
     )
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             await list_items(client)
 
@@ -509,7 +524,7 @@ async def test_classifications_are_reused_until_the_text_changes_and_then_refetc
     fixture = mailbox(message("m1", "body-one", 1), message("m2", "body-two", 2))
 
     with counting_source(fixture) as (url, requests):
-        with start_gate(mail_url=url, env_extra=setup.env()) as gate:
+        with start_gate(mail_url=url, extra_env=setup.env()) as gate:
             async with agent_client(gate) as client:
                 first = await list_items(client)
                 await list_items(client)
@@ -545,7 +560,7 @@ async def test_classifications_survive_a_restart_but_not_a_new_topic_list_or_inf
     async def run() -> int:
         """Restart the gate, list the items, and say how many items were classified."""
         before = len(setup.calls())
-        with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+        with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
             async with agent_client(gate) as client:
                 await list_items(client)
         return len(setup.calls()) - before
@@ -574,7 +589,7 @@ async def test_an_unavailable_classification_is_tried_again_not_cached(
     setup.rule("body", unavailable=True)
     fixture = write_fixture(tmp_path / "mail.json", mailbox(message("m1", "body-one", 1)))
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             [down] = await list_items(client)
             [still_down] = await list_items(client)
@@ -583,7 +598,7 @@ async def test_an_unavailable_classification_is_tried_again_not_cached(
 
     setup.rules.clear()
     setup.rule("body", GOOD)
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             [recovered] = await list_items(client)
     assert served(recovered) == {**GOOD_SERVED, "status": "classified"}
@@ -602,7 +617,7 @@ async def test_the_stub_without_a_script_classifies_by_simple_keywords(
         ),
     )
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             first, second = await list_items(client)
 
@@ -643,7 +658,7 @@ async def test_items_are_filtered_grouped_and_counted_by_each_semantic_field(
         mailbox(*(message(label, f"body-{label}", minute) for minute, label in enumerate("abcde"))),
     )
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         async with agent_client(gate) as client:
             everything = await list_items(client)
             by_label = {
@@ -732,7 +747,7 @@ async def test_corpus_strings_in_item_text_and_in_classifier_output_reach_no_cha
         setup.rule(text, output)
     fixture = write_fixture(tmp_path / "hostile.json", hostile_mail_fixture())
 
-    with start_gate(mail_fixture=fixture, env_extra=setup.env()) as gate:
+    with start_gate(mail_fixture=fixture, extra_env=setup.env()) as gate:
         channels = await observe_gate(gate)
         async with agent_client(gate) as client:
             items = await list_items(client)

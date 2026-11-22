@@ -11,10 +11,21 @@ import anyio.to_thread
 from mcp import types
 from pydantic import BaseModel, ValidationError
 
+from glovebox.access import (
+    COUNT_OPERATION,
+    GROUP_OPERATION,
+    LIST_ACCOUNTS_OPERATION,
+    LIST_OPERATION,
+    LIST_TOPICS_OPERATION,
+    Access,
+    Grant,
+)
 from glovebox.classification import QuarantinedClassifier
 from glovebox.classifier_config import ClassifierConfig
+from glovebox.credentials import CredentialsError
 from glovebox.formats import MAX_ITEMS
 from glovebox.output import (
+    AccountsOutput,
     CountOutput,
     GroupOutput,
     ListOutput,
@@ -25,6 +36,7 @@ from glovebox.output import (
     success_result,
 )
 from glovebox.query import (
+    AccountsInput,
     CountInput,
     Filters,
     GroupInput,
@@ -34,15 +46,17 @@ from glovebox.query import (
     encode_cursor,
     query_digest,
 )
-from glovebox.sources import MailSource, SourceError
+from glovebox.sources import SourceError, open_source
 from glovebox.store import Store
 
 logger = logging.getLogger(__name__)
 
-LIST_TOOL = "list_items"
-COUNT_TOOL = "count_items"
-GROUP_TOOL = "group_items"
-TOPICS_TOOL = "list_topics"
+# One tool per read operation a token can be limited to, under the same name.
+ACCOUNTS_TOOL = LIST_ACCOUNTS_OPERATION
+LIST_TOOL = LIST_OPERATION
+COUNT_TOOL = COUNT_OPERATION
+GROUP_TOOL = GROUP_OPERATION
+TOPICS_TOOL = LIST_TOPICS_OPERATION
 
 READ_ONLY = types.ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -79,6 +93,18 @@ class ToolSpec:
 
 
 SPECS: dict[str, ToolSpec] = {
+    ACCOUNTS_TOOL: ToolSpec(
+        _definition(
+            ACCOUNTS_TOOL,
+            "Lists the accounts this token covers: account handle and source kind for each. "
+            "Accounts the token does not cover are not listed and cannot be told apart from "
+            "accounts that do not exist.",
+            AccountsInput,
+            AccountsOutput,
+        ),
+        AccountsInput,
+        AccountsOutput,
+    ),
     LIST_TOOL: ToolSpec(
         _definition(
             LIST_TOOL,
@@ -136,37 +162,58 @@ SPECS: dict[str, ToolSpec] = {
     ),
 }
 
-TOOLS = [spec.definition for spec in SPECS.values()]
-
 
 class ReadTool:
     def __init__(
         self,
         store: Store,
-        source: MailSource | None,
+        access: Access,
         clock: Callable[[], datetime],
         classifier: QuarantinedClassifier,
         config: ClassifierConfig,
     ) -> None:
         self._store = store
-        self._source = source
+        self._access = access
         self._clock = clock
         self._classifier = classifier
         self._topic_ids = [topic.id for topic in config.topics]
         self._config_digest = config.digest()
         self._sync = threading.Lock()
 
+    async def definitions(self, principal: str | None) -> list[types.Tool]:
+        """The tools the caller's token may use, and no others."""
+        grant = await self._grant(principal)
+        if grant is None:
+            return []
+        return [spec.definition for name, spec in SPECS.items() if name in grant.operations]
+
+    async def _grant(self, principal: str | None) -> Grant | None:
+        # The database may be busy for a while: never wait for it on the event loop.
+        if principal is None:
+            return None
+        return await anyio.to_thread.run_sync(self._access.grant, principal)
+
     async def call(
         self, name: str, arguments: Mapping[str, Any] | None, principal: str | None
     ) -> types.CallToolResult:
         """Answer one tool call. Whatever happens, the response passes the validator.
 
-        `principal` is the identity of the authenticated caller; page cursors are bound to it.
+        `principal` is the id of the authenticated token; page cursors are bound to it, and
+        so are the accounts and operations the call may reach.
         """
-        spec = SPECS.get(name)
-        output = spec.output if spec else Output
+        output: type[Output] = Output
         try:
-            response = await anyio.to_thread.run_sync(self._respond, name, arguments, principal)
+            grant = await self._grant(principal)
+            spec = None if grant is None else _permitted_spec(name, grant.operations)
+            if spec is not None:
+                output = spec.output
+            if grant is None or spec is None:
+                # A tool outside the token's operations is answered as one that does not exist.
+                response = error_result("unknown_tool" if grant else "internal_error")
+            else:
+                response = await anyio.to_thread.run_sync(
+                    self._respond, name, spec, arguments, grant
+                )
             return release(response, output)
         except Exception as error:
             # Only the type is logged: an exception message may hold upstream text.
@@ -174,13 +221,8 @@ class ReadTool:
             return release(error_result("internal_error", output))
 
     def _respond(
-        self, name: str, arguments: Mapping[str, Any] | None, principal: str | None
+        self, name: str, spec: ToolSpec, arguments: Mapping[str, Any] | None, grant: Grant
     ) -> types.CallToolResult:
-        spec = SPECS.get(name)
-        if spec is None:
-            return error_result("unknown_tool")
-        if principal is None:
-            return error_result("internal_error", spec.output)
         try:
             request = spec.inputs.model_validate(arguments or {}, strict=True)
         except ValidationError:
@@ -188,6 +230,15 @@ class ReadTool:
             return error_result("invalid_arguments", spec.output)
         if isinstance(request, TopicsInput):
             return success_result({"topics": self._topic_ids})
+        if isinstance(request, AccountsInput):
+            return success_result(
+                {
+                    "accounts": [
+                        {"account_handle": account.handle, "source_kind": account.kind}
+                        for account in grant.accounts
+                    ]
+                }
+            )
         if not isinstance(request, Filters):
             return error_result("internal_error", spec.output)
 
@@ -195,36 +246,55 @@ class ReadTool:
         if isinstance(request, ListInput | GroupInput):
             selector = request.sort if isinstance(request, ListInput) else request.group_by
             digest = query_digest(name, request.only_filters(), selector)
-            paging = Paging(self._store.cursor_key(), principal, digest, 0)
+            # Cursors are bound to the token: another token's cursor, for any account, is
+            # as invalid as one that was never issued.
+            paging = Paging(self._store.cursor_key(), grant.token_id, digest, 0)
             if request.cursor is not None:
                 paging = paging.resume(request.cursor)
                 if paging is None:
                     return error_result("invalid_cursor", spec.output)
-        if self._source is None:
-            return error_result("source_unavailable", spec.output)
+        filters = request.only_filters()
+        # An account handle outside the token's accounts selects nothing, exactly as one
+        # that does not exist does. Only the selected accounts are fetched.
+        selected = [
+            account
+            for account in grant.accounts
+            if filters.account_handle in (None, account.handle)
+        ]
 
         with self._sync:
-            try:
-                mailbox = self._source.fetch()
-            except SourceError:
-                logger.warning("source unavailable")
-                return error_result("source_unavailable", spec.output)
+            fetched = []
+            for account in selected:
+                try:
+                    source = open_source(account.kind, account.source, account.credentials)
+                    fetched.append((account, source.fetch()))
+                except CredentialsError as error:
+                    # The message is fixed text; the account name is the operator's own label.
+                    logger.warning("account %s unavailable: %s", account.name, error)
+                    return error_result("source_unavailable", spec.output)
+                except SourceError:
+                    logger.warning("account %s unavailable: its source failed", account.name)
+                    return error_result("source_unavailable", spec.output)
             now = self._clock()
-            # Each item is classified on its own, outside any database transaction; one
-            # that is unchanged since its last classification is not classified again.
-            prepared = self._store.prepare_mailbox(mailbox, now, self._config_digest)
-            classifications = [
-                item.cached or self._classifier.classify(item.item.text, now)
-                for item in prepared.items
-            ]
-            account = self._store.commit_mailbox(
-                self._source.kind, prepared, classifications, self._config_digest, now
-            )
-            filters = request.only_filters()
+            for account, mailbox in fetched:
+                # Each item is classified on its own, outside any database transaction;
+                # one that is unchanged since its last classification is not classified
+                # again.
+                prepared = self._store.prepare_mailbox(
+                    account.handle, mailbox, now, self._config_digest
+                )
+                classifications = [
+                    item.cached or self._classifier.classify(item.item.text, now)
+                    for item in prepared.items
+                ]
+                self._store.commit_mailbox(
+                    account.kind, prepared, classifications, self._config_digest, now
+                )
+            handles = [account.handle for account in selected]
             if isinstance(request, ListInput) and paging is not None:
                 # One row past the page tells whether there is a next one.
                 rows = self._store.list_items(
-                    account, now, filters, request.sort, request.limit + 1, paging.offset
+                    handles, now, filters, request.sort, request.limit + 1, paging.offset
                 )
                 items = rows[: request.limit]
                 return success_result(
@@ -232,7 +302,7 @@ class ReadTool:
                 )
             if isinstance(request, GroupInput) and paging is not None:
                 found = self._store.group_items(
-                    account, now, filters, request.group_by, request.limit + 1, paging.offset
+                    handles, now, filters, request.group_by, request.limit + 1, paging.offset
                 )
                 groups = found[: request.limit]
                 return success_result(
@@ -241,7 +311,11 @@ class ReadTool:
                         "next_cursor": paging.next(len(groups), len(found) > len(groups)),
                     }
                 )
-            return success_result({"count": self._store.count_items(account, now, filters)})
+            return success_result({"count": self._store.count_items(handles, now, filters)})
+
+
+def _permitted_spec(name: str, operations: frozenset[str]) -> ToolSpec | None:
+    return SPECS.get(name) if name in operations else None
 
 
 @dataclass(frozen=True)

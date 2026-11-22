@@ -23,7 +23,7 @@ from glovebox.fields import (
     TopicId,
     YesNoUnknown,
 )
-from glovebox.formats import MAX_ITEMS, MAX_TOPICS
+from glovebox.formats import MAX_ACCOUNTS, MAX_ITEMS, MAX_TOPICS
 from glovebox.sources import ReadStatus, SourceKind
 
 ErrorCode = Literal[
@@ -71,6 +71,17 @@ class MailItem(BaseModel):
 
 class TopicsOutput(Output):
     topics: list[TopicId] = Field(default=[], max_length=MAX_TOPICS)
+
+
+class AccountEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    account_handle: Handle
+    source_kind: SourceKind
+
+
+class AccountsOutput(Output):
+    accounts: list[AccountEntry] = Field(default=[], max_length=MAX_ACCOUNTS)
 
 
 class ListOutput(Output):

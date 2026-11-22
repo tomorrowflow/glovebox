@@ -1,6 +1,7 @@
 """Where the published gate port listens on each tier (ADR 0007).
 
-The gate has no authentication yet, so no tier publishes it beyond loopback.
+The gate accepts only issued agent tokens, but its allowed-hosts setting is loopback only,
+so no tier publishes it beyond loopback.
 """
 
 import json
