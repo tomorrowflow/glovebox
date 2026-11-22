@@ -3,7 +3,9 @@
 An adapter fetches one account's mail and hands the gate normalized records. A
 record holds the upstream keys the handle registry needs and the few values that
 become permitted fields; subjects, bodies, names, recipients, filenames and every
-other upstream value are never read out of the document (ADR 0004).
+other upstream value are never read out of the document (ADR 0004). The one exception is
+an item's text, its subject and body: it is read so that the quarantined classifier can
+judge it, held in memory for that, and never stored, logged or served.
 """
 
 import http.client
@@ -11,7 +13,7 @@ import json
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from pathlib import Path
@@ -22,6 +24,11 @@ from glovebox.credentials import read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
 SourceKind = Literal["fixture_mail"]
+# How fresh and complete an account's data is. `current`: the last sync read the whole
+# source. `incomplete`: it did, but some items could not be understood and are missing.
+# `stale`: the last sync failed, so the data is from an earlier one. `blocked`: the last
+# sync failed because access is not granted.
+SyncStatus = Literal["current", "stale", "incomplete", "blocked"]
 SOURCE_KINDS: tuple[str, ...] = get_args(SourceKind)
 # Kinds whose account must name a credentials file. The fixture kind talks to a
 # stand-in that asks for none.
@@ -29,11 +36,20 @@ CREDENTIALS_REQUIRED: frozenset[str] = frozenset()
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 10
+MAX_TEXT_CHARS = 16_000  # what the classifier is shown of one item; the rest is cut off
+
+
+# HTTP statuses that mean access to the source is not granted, as opposed to it being down.
+BLOCKED_HTTP_STATUSES = frozenset({401, 403})
 
 
 class SourceError(Exception):
     """The source could not be read or understood. It carries no detail on purpose:
     anything an upstream said stays out of exceptions, logs and responses."""
+
+
+class SourceBlocked(SourceError):
+    """The source refused access: credentials or permissions are missing, not the network."""
 
 
 @dataclass(frozen=True)
@@ -46,19 +62,27 @@ class SourceItem:
     received: datetime  # UTC, truncated to the minute
     read_status: ReadStatus
     has_attachments: bool
+    # The subject and body, for the classifier only. Kept out of repr so that an item that
+    # ends up in a log line or a traceback does not carry it.
+    text: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
 class SourceMailbox:
     account_key: str
     items: list[SourceItem]
+    skipped: int = 0  # items that could not be understood and were left out
 
 
 class MailSource(Protocol):
     kind: SourceKind
 
     def fetch(self) -> SourceMailbox:
-        """Fetch the account's recent mail. Raises SourceError, never anything with detail."""
+        """Fetch the account's recent mail.
+
+        Raises SourceBlocked if access is not granted and SourceError for any other
+        failure, never anything with detail.
+        """
         ...
 
 
@@ -67,7 +91,8 @@ class FixtureMailSource:
 
     The document has the shape the stand-ins serve: an `account` and a list of
     `messages`. Each message needs `id`, `from` and `received`; `thread`, `read` and
-    `attachments` are optional. A message that cannot be understood is skipped.
+    `attachments` are optional. A message that cannot be understood is skipped and
+    counted.
     """
 
     kind: SourceKind = "fixture_mail"
@@ -78,6 +103,15 @@ class FixtureMailSource:
     def fetch(self) -> SourceMailbox:
         try:
             return parse_mailbox(json.loads(self._read()))
+        except SourceError:
+            raise
+        except urllib.error.HTTPError as error:
+            error.close()
+            if error.code in BLOCKED_HTTP_STATUSES:
+                raise SourceBlocked from None
+            raise SourceError from None
+        except PermissionError:
+            raise SourceBlocked from None
         except (
             OSError,
             ValueError,  # includes bad JSON and bad UTF-8
@@ -108,11 +142,14 @@ def parse_mailbox(document: object) -> SourceMailbox:
     if not isinstance(account, str) or not account or not isinstance(messages, list):
         raise SourceError
     items: dict[str, SourceItem] = {}
+    skipped = 0
     for message in messages:
         item = parse_message(message)
-        if item is not None and item.upstream_id not in items:
+        if item is None:
+            skipped += 1
+        elif item.upstream_id not in items:
             items[item.upstream_id] = item
-    return SourceMailbox(account_key=account, items=list(items.values()))
+    return SourceMailbox(account_key=account, items=list(items.values()), skipped=skipped)
 
 
 def parse_message(message: object) -> SourceItem | None:
@@ -136,7 +173,16 @@ def parse_message(message: object) -> SourceItem | None:
         received=received,
         read_status=read_status_of(read),
         has_attachments=isinstance(attachments, list) and len(attachments) > 0,
+        text=text_of(message),
     )
+
+
+def text_of(message: Mapping[str, object]) -> str:
+    """The subject and body, those of them that are strings, cut to the classifier's limit."""
+    parts = [
+        part for part in (message.get("subject"), message.get("body")) if isinstance(part, str)
+    ]
+    return "\n\n".join(parts)[:MAX_TEXT_CHARS]
 
 
 def read_status_of(read: object) -> ReadStatus:

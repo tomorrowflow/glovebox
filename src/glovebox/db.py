@@ -59,14 +59,22 @@ create table if not exists items (
     thread_handle text not null,
     received text not null,
     read_status text not null,
-    has_attachments integer not null
+    has_attachments integer not null,
+    topic text not null,
+    reply_needed text not null,
+    action_requested text not null,
+    deadline text,
+    classification_status text not null,
+    content_digest text not null,
+    config_digest text not null
 );
 create index if not exists items_by_received on items (received desc, item_handle);
 create table if not exists sync_state (
     account_handle text primary key,
     source_kind text not null,
     status text not null,
-    last_sync text not null
+    last_sync text not null,
+    skipped integer not null default 0
 );
 """
 
@@ -81,7 +89,20 @@ def prepare(path: Path) -> None:
     # The file is private to the gateway's user before anything is written to it.
     os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
     with closing(sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)) as database:
+        _drop_items_without_semantic_fields(database)
         database.executescript(SCHEMA)
+        # A database from before sync counts: add the column the schema now has.
+        columns = {row[1] for row in database.execute("pragma table_info(sync_state)")}
+        if "skipped" not in columns:
+            database.execute("alter table sync_state add column skipped integer not null default 0")
+
+
+def _drop_items_without_semantic_fields(database: sqlite3.Connection) -> None:
+    """Items are a copy of what the source serves, rebuilt on every call, so a table from
+    before the semantic fields is dropped rather than migrated."""
+    columns = {row[1] for row in database.execute("pragma table_info(items)")}
+    if columns and "classification_status" not in columns:
+        database.execute("drop table items")
 
 
 @contextmanager

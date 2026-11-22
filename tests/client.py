@@ -13,9 +13,10 @@ ACCOUNTS_TOOL = "list_accounts"
 LIST_TOOL = "list_items"
 COUNT_TOOL = "count_items"
 GROUP_TOOL = "group_items"
-# The tools that read items, which need a source; `list_accounts` does not.
+TOPICS_TOOL = "list_topics"
+# The tools that read items, which need a source; `list_accounts` and `list_topics` do not.
 READ_TOOLS = [LIST_TOOL, COUNT_TOOL, GROUP_TOOL]
-ALL_TOOLS = [ACCOUNTS_TOOL, *READ_TOOLS]
+ALL_TOOLS = [ACCOUNTS_TOOL, *READ_TOOLS, TOPICS_TOOL]
 
 
 @asynccontextmanager

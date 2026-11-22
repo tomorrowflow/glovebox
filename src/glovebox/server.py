@@ -1,8 +1,8 @@
 """The gate service: an MCP server over Streamable HTTP, behind operator-issued agent tokens.
 
-It offers the read tools (list accounts, list, count, group) and nothing else: no
-resources, no prompts, no write tool, and no account or token management, which stays
-on the operator's command line. A token sees only the tools its operations name. The
+It offers the read tools (list accounts, list, count, group and the topic IDs) and nothing
+else: no resources, no prompts, no write tool, and no account or token management, which
+stays on the operator's command line. A token sees only the tools its operations name. The
 server is built on the low-level SDK server so that only the tool-listing and tool-call
 handlers exist; capabilities are derived from the handlers, so none can be advertised
 by accident.
@@ -19,13 +19,23 @@ from starlette.applications import Starlette
 
 from glovebox.access import Access
 from glovebox.auth import PRINCIPAL_KEY, AgentTokenMiddleware
+from glovebox.classification import Classifier, QuarantinedClassifier
+from glovebox.classifier_config import ClassifierConfig, load_classifier_config
 from glovebox.config import Settings
 from glovebox.store import Store
+from glovebox.stub import StubClassifier
 from glovebox.tool import ReadTool
 
 # What the SDK allows by default for a gate on loopback, with every port.
 LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+
+
+def build_classifier(settings: Settings, config: ClassifierConfig) -> QuarantinedClassifier:
+    backend: Classifier | None = None
+    if config.backend == "stub":
+        backend = StubClassifier.from_files(settings.stub_script, settings.stub_probe)
+    return QuarantinedClassifier(backend, config.topics, config.deadline_range)
 
 
 def principal_of_request(ctx: ServerRequestContext) -> str | None:
@@ -69,8 +79,15 @@ def transport_security(allowed_hosts: Sequence[str]) -> TransportSecuritySetting
 
 def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or Settings.from_env(os.environ)
+    config = load_classifier_config(settings.classifier_config)
     access = Access(settings.db_path)
-    tool = ReadTool(Store(settings.db_path), access, settings.clock())
+    tool = ReadTool(
+        Store(settings.db_path),
+        access,
+        settings.clock(),
+        build_classifier(settings, config),
+        config,
+    )
     app = create_server(tool).streamable_http_app(
         transport_security=transport_security(settings.allowed_hosts)
     )

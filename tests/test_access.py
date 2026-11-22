@@ -19,7 +19,14 @@ from typing import Any
 import httpx2
 import pytest
 
-from tests.client import ACCOUNTS_TOOL, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent_client
+from tests.client import (
+    ACCOUNTS_TOOL,
+    COUNT_TOOL,
+    GROUP_TOOL,
+    LIST_TOOL,
+    TOPICS_TOOL,
+    agent_client,
+)
 from tests.conftest import (
     DEFAULT_ACCOUNT,
     GateStarter,
@@ -324,7 +331,8 @@ async def test_a_token_limited_to_some_operations_sees_only_those_tools(
             nonexistent = await client.call_tool("no_such_tool", {})
 
     assert tools == [COUNT_TOOL]
-    assert counted == {"error": "none", "count": "3"}
+    assert (counted["error"], counted["count"]) == ("none", "3")
+    assert [account["status"] for account in counted["accounts"]] == ["current"]
     for refused in (hidden, accounts):
         assert refused.is_error is True
         assert refused.model_dump_json() == nonexistent.model_dump_json()
@@ -332,7 +340,7 @@ async def test_a_token_limited_to_some_operations_sees_only_those_tools(
 
 
 @pytest.mark.anyio
-async def test_the_accounts_tool_gives_only_handle_and_source_kind(
+async def test_the_accounts_tool_gives_only_handle_source_kind_and_sync_status(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:
     with start_gate(accounts=two_accounts(tmp_path), tokens=SCOPES) as gate:
@@ -345,8 +353,20 @@ async def test_the_accounts_tool_gives_only_handle_and_source_kind(
     assert set(structured) == {"error", "accounts"}
     assert len(structured["accounts"]) == 2
     for entry in structured["accounts"]:
-        assert set(entry) == {"account_handle", "source_kind"}
+        assert set(entry) == {
+            "account_handle",
+            "source_kind",
+            "status",
+            "last_sync",
+            "skipped_items",
+        }
         assert entry["source_kind"] == "fixture_mail"
+        # Listing reads no source: nothing has synced yet, and the entry says so.
+        assert (entry["status"], entry["last_sync"], entry["skipped_items"]) == (
+            "stale",
+            None,
+            "0",
+        )
     # The operator's names for the accounts are not part of anything an agent sees.
     assert "alice" not in result.model_dump_json() and "bob" not in result.model_dump_json()
     assert rejected.structured_content == {"error": "invalid_arguments", "accounts": []}
@@ -379,7 +399,7 @@ async def test_nothing_of_the_operators_setup_is_reachable_through_mcp(
             operator(gate.db, "token", "list").stdout,
         )
 
-    assert names == [ACCOUNTS_TOOL, LIST_TOOL, COUNT_TOOL, GROUP_TOOL]
+    assert names == [ACCOUNTS_TOOL, LIST_TOOL, COUNT_TOOL, GROUP_TOOL, TOPICS_TOOL]
     assert before == after
 
 
@@ -485,7 +505,7 @@ def test_a_token_value_is_shown_once_and_the_database_holds_no_usable_copy(
         assert value not in listing.stdout + listing.stderr
     record = operator(db, "token", "list").stdout.strip().split("\t")
     assert record[1] == "active" and record[3] == "work" and record[5] == "agent-one"
-    assert record[4] == "list_accounts,list_items,count_items,group_items"
+    assert record[4] == "list_accounts,list_items,count_items,group_items,list_topics"
     # Below the seam on purpose: the stored files hold the verifier, not the value, and the
     # verifier is not itself a token.
     files = storage_files(db)

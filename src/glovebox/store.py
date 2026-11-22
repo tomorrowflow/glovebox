@@ -5,6 +5,8 @@ handle registry therefore does not keep upstream IDs, sender addresses or thread
 keys: it keeps a keyed digest of each, with a key that exists only in this
 database, which is enough to give the same upstream entity the same handle again.
 Handles themselves come from randomness and have no relation to what they stand for.
+The same goes for the cache of classifications: an item's text is kept only as a keyed
+digest, enough to tell that it changed.
 """
 
 import hashlib
@@ -13,15 +15,29 @@ import secrets
 import sqlite3
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from glovebox import db
+from glovebox.classification import UNKNOWN, Classification
 from glovebox.db import MINT_ATTEMPTS, new_handle
-from glovebox.formats import COUNT_CAP, COUNT_CAPPED, MINUTE_FORMAT, WINDOW_DAYS
+from glovebox.fields import ClassificationStatus
+from glovebox.formats import (
+    COUNT_CAP,
+    COUNT_CAPPED,
+    SKIPPED_CAP,
+    SKIPPED_CAPPED,
+    WINDOW_DAYS,
+    minute,
+)
 from glovebox.query import Filters, GroupBy, SortOrder
-from glovebox.sources import SourceMailbox
+from glovebox.sources import SourceItem, SourceMailbox, SyncStatus
+
+# What `sync_state.last_sync` holds for an account that has never synced: the column
+# cannot be null, and no minute is ever empty.
+NEVER_SYNCED = ""
 
 # The fixed sort orders, each ending in the item handle so that a page boundary is stable.
 SORT_ORDERS: dict[SortOrder, str] = {
@@ -38,11 +54,36 @@ GROUP_COLUMNS: dict[GroupBy, str] = {
     "thread_handle": "thread_handle",
     "read_status": "read_status",
     "source_kind": "source_kind",
+    "topic": "topic",
+    "reply_needed": "reply_needed",
+    "action_requested": "action_requested",
+    "deadline": "deadline",
+    "classification_status": "classification_status",
 }
+STATUSES = get_args(ClassificationStatus)
+
+ITEM_COLUMN_COUNT = 15  # the columns of the items table, in the order it declares them
+
+# The columns of an item row that the classifier decides, with its status.
+SEMANTIC_COLUMNS = "topic, reply_needed, action_requested, deadline, classification_status"
 
 
-def minute(moment: datetime) -> str:
-    return moment.strftime(MINUTE_FORMAT)
+@dataclass(frozen=True)
+class PreparedItem:
+    """An in-window item with its handle, a keyed digest of its text and, if a classification
+    stored for exactly this text under the current configuration can be reused, that one."""
+
+    item_handle: str
+    item: SourceItem
+    content_digest: str
+    cached: Classification | None
+
+
+@dataclass(frozen=True)
+class PreparedMailbox:
+    account: str
+    items: list[PreparedItem]
+    skipped: int = 0  # items the source held that could not be understood
 
 
 class Store:
@@ -50,7 +91,7 @@ class Store:
         self._path = path
         db.prepare(path)
         with self._transaction() as database:
-            for name in ("handle_key", "cursor_key"):
+            for name in ("handle_key", "cursor_key", "content_key"):
                 database.execute(
                     "insert or ignore into meta (key, value) values (?, ?)",
                     (name, secrets.token_hex(32)),
@@ -67,16 +108,62 @@ class Store:
         with self._reader() as database:
             return _meta_key(database, "cursor_key")
 
-    def replace_mailbox(
-        self, account: str, kind: str, mailbox: SourceMailbox, synced_at: datetime
+    def prepare_mailbox(
+        self, account: str, mailbox: SourceMailbox, synced_at: datetime, config_digest: str
+    ) -> PreparedMailbox:
+        """Give each in-window item its handle and find which classifications can be reused.
+
+        Mail outside the rolling window at `synced_at` is not ingested. A stored
+        classification is reusable when the item's text and the classifier configuration
+        (`config_digest`) are what they were when it was made, and it was an answer: an
+        `unavailable` one is tried again. Nothing is changed here but the handle registry.
+        An account the operator removed in the meantime has no items to prepare.
+        """
+        window_start, window_end = window(synced_at)
+        with self._transaction() as database:
+            known = database.execute("select 1 from accounts where handle = ?", (account,))
+            if known.fetchone() is None:
+                return PreparedMailbox(account, [], mailbox.skipped)
+            key = _meta_key(database, "handle_key")
+            content_key = _meta_key(database, "content_key")
+            stored = {
+                row[0]: row
+                for row in database.execute(
+                    f"select item_handle, content_digest, config_digest, {SEMANTIC_COLUMNS}"
+                    " from items where account_handle = ?",
+                    (account,),
+                )
+            }
+            items: list[PreparedItem] = []
+            for item in mailbox.items:
+                if not window_start <= minute(item.received) <= window_end:
+                    continue
+                handle = _handle(database, key, "item", account, item.upstream_id)
+                digest = _content_digest(content_key, item.text)
+                items.append(
+                    PreparedItem(
+                        handle, item, digest, _reusable(stored.get(handle), digest, config_digest)
+                    )
+                )
+        return PreparedMailbox(account, items, mailbox.skipped)
+
+    def commit_mailbox(
+        self,
+        kind: str,
+        prepared: PreparedMailbox,
+        classifications: Sequence[Classification],
+        config_digest: str,
+        synced_at: datetime,
     ) -> None:
         """Make the account's stored items match one complete fetch, in one transaction.
 
-        Mail outside the rolling window at `synced_at` is not ingested, and items of
-        any account that have left the window are dropped. An account the operator
-        removed in the meantime is not written to.
+        `classifications` holds one entry per prepared item, in order. Items of any
+        account that have left the window are dropped. The account is current, or
+        incomplete if the source held items that could not be understood. An account the
+        operator removed in the meantime is not written to.
         """
-        window_start, window_end = window(synced_at)
+        window_start, _ = window(synced_at)
+        account = prepared.account
         with self._transaction() as database:
             known = database.execute("select 1 from accounts where handle = ?", (account,))
             if known.fetchone() is None:
@@ -84,13 +171,12 @@ class Store:
             key = _meta_key(database, "handle_key")
             database.execute("delete from items where account_handle = ?", (account,))
             database.execute("delete from items where received < ?", (window_start,))
-            for item in mailbox.items:
-                if not window_start <= minute(item.received) <= window_end:
-                    continue
+            for prepared_item, classification in zip(prepared.items, classifications, strict=True):
+                item = prepared_item.item
                 database.execute(
-                    "insert or replace into items values (?, ?, ?, ?, ?, ?, ?, ?)",
+                    f"insert or replace into items values ({', '.join('?' * ITEM_COLUMN_COUNT)})",
                     (
-                        _handle(database, key, "item", account, item.upstream_id),
+                        prepared_item.item_handle,
                         account,
                         kind,
                         _handle(database, key, "sender", account, item.sender_key),
@@ -98,12 +184,67 @@ class Store:
                         minute(item.received),
                         item.read_status,
                         int(item.has_attachments),
+                        classification.topic,
+                        classification.reply_needed,
+                        classification.action_requested,
+                        classification.deadline,
+                        classification.status,
+                        prepared_item.content_digest,
+                        config_digest,
                     ),
                 )
+            status: SyncStatus = "incomplete" if prepared.skipped else "current"
             database.execute(
-                "insert or replace into sync_state values (?, ?, 'current', ?)",
-                (account, kind, minute(synced_at)),
+                "insert or replace into sync_state"
+                " (account_handle, source_kind, status, last_sync, skipped)"
+                " values (?, ?, ?, ?, ?)",
+                (account, kind, status, minute(synced_at), prepared.skipped),
             )
+
+    def mark_unsynced(self, account: str, kind: str, status: SyncStatus) -> None:
+        """Record that the last sync of the account failed.
+
+        The account keeps its last successful sync time, and its stored items stay as they
+        were. An account that never synced is recorded as such. An account the operator
+        removed in the meantime is not written to.
+        """
+        with self._transaction() as database:
+            known = database.execute("select 1 from accounts where handle = ?", (account,))
+            if known.fetchone() is None:
+                return
+            database.execute(
+                "insert into sync_state (account_handle, source_kind, status, last_sync)"
+                " values (?, ?, ?, ?)"
+                " on conflict (account_handle) do update set status = excluded.status",
+                (account, kind, status, NEVER_SYNCED),
+            )
+
+    def account_sync(self, accounts: Sequence[str]) -> list[dict[str, Any]]:
+        """Each of `accounts` with its sync status, in the order given, as stored.
+
+        An account that never synced is `stale` with no sync time. Nothing here vouches for
+        the values. An account that no longer exists is left out.
+        """
+        marks = ", ".join("?" for _ in accounts)
+        with self._reader() as database:
+            rows = database.execute(
+                "select accounts.handle, accounts.source_kind, sync_state.status,"
+                " sync_state.last_sync, sync_state.skipped from accounts"
+                " left join sync_state on sync_state.account_handle = accounts.handle"
+                f" where accounts.handle in ({marks})",
+                tuple(accounts),
+            ).fetchall()
+        by_handle = {
+            row[0]: {
+                "account_handle": row[0],
+                "source_kind": row[1],
+                "status": "stale" if row[2] is None else row[2],
+                "last_sync": None if row[3] in (None, NEVER_SYNCED) else row[3],
+                "skipped_items": spell_skipped(0 if row[4] is None else row[4]),
+            }
+            for row in rows
+        }
+        return [by_handle[handle] for handle in accounts if handle in by_handle]
 
     def list_items(
         self,
@@ -123,7 +264,8 @@ class Store:
         with self._reader() as database:
             rows = database.execute(
                 "select item_handle, account_handle, source_kind, sender_handle, thread_handle,"
-                f" received, read_status, has_attachments from items where {where}"
+                f" received, read_status, has_attachments, {SEMANTIC_COLUMNS} from items"
+                f" where {where}"
                 f" order by {SORT_ORDERS[order]} limit ? offset ?",
                 (*parameters, limit, offset),
             ).fetchall()
@@ -138,6 +280,11 @@ class Store:
                 "read_status": row[6],
                 # Anything but 0 or 1 stays as it is, for the output validator to refuse.
                 "has_attachments": {0: False, 1: True}.get(row[7], row[7]),
+                "topic": row[8],
+                "reply_needed": row[9],
+                "action_requested": row[10],
+                "deadline": UNKNOWN if row[11] is None else row[11],
+                "classification_status": row[12],
             }
             for row in rows
         ]
@@ -175,11 +322,22 @@ class Store:
                 f" order by min(count(*), ?) desc, {column} limit ? offset ?",
                 (*parameters, COUNT_CAP + 1, limit, offset),
             ).fetchall()
-        return [{"key": row[0], "count": spell_count(row[1])} for row in rows]
+        # A deadline that is not known is stored as no value and spelled `unknown`.
+        return [
+            {"key": UNKNOWN if row[0] is None else row[0], "count": spell_count(row[1])}
+            for row in rows
+        ]
 
 
 def spell_count(count: int) -> str:
     return COUNT_CAPPED if count > COUNT_CAP else str(count)
+
+
+def spell_skipped(count: object) -> str:
+    """How many items were skipped, as the response spells it: capped at `10+`."""
+    if isinstance(count, int) and count > SKIPPED_CAP:
+        return SKIPPED_CAPPED
+    return str(count)
 
 
 def window(now: datetime) -> tuple[str, str]:
@@ -208,12 +366,35 @@ def _where(accounts: Sequence[str], now: datetime, filters: Filters) -> tuple[st
         ),
         ("sender_handle = ?", filters.sender_handle),
         ("thread_handle = ?", filters.thread_handle),
+        ("topic = ?", filters.topic),
+        ("reply_needed = ?", filters.reply_needed),
+        ("action_requested = ?", filters.action_requested),
+        # An unknown deadline is stored as no value, which no range matches.
+        ("deadline >= ?", filters.deadline_from),
+        ("deadline <= ?", filters.deadline_to),
+        ("classification_status = ?", filters.classification_status),
     ]
     for condition, value in optional:
         if value is not None:
             conditions.append(condition)
             parameters.append(value)
     return " and ".join(conditions), parameters
+
+
+def _content_digest(key: bytes, text: str) -> str:
+    """A keyed digest of an item's text: enough to tell that it changed, not to recover or
+    guess it."""
+    return hmac.new(key, text.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()
+
+
+def _reusable(row: Any, content_digest: str, config_digest: str) -> Classification | None:
+    """The classification in a stored item row, if it answers for this text and configuration."""
+    if row is None or (row[1], row[2]) != (content_digest, config_digest):
+        return None
+    topic, reply_needed, action_requested, deadline, status = row[3:8]
+    if status not in STATUSES or status == "unavailable":
+        return None
+    return Classification(topic, reply_needed, action_requested, deadline, status)
 
 
 def _meta_key(database: sqlite3.Connection, name: str) -> bytes:

@@ -27,8 +27,15 @@ LIST_ACCOUNTS_OPERATION = "list_accounts"
 LIST_OPERATION = "list_items"
 COUNT_OPERATION = "count_items"
 GROUP_OPERATION = "group_items"
+LIST_TOPICS_OPERATION = "list_topics"
 # The read operations a token can be limited to; one name per read tool.
-OPERATIONS = (LIST_ACCOUNTS_OPERATION, LIST_OPERATION, COUNT_OPERATION, GROUP_OPERATION)
+OPERATIONS = (
+    LIST_ACCOUNTS_OPERATION,
+    LIST_OPERATION,
+    COUNT_OPERATION,
+    GROUP_OPERATION,
+    LIST_TOPICS_OPERATION,
+)
 
 ACCOUNT_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 LABEL = re.compile(r"[A-Za-z0-9 ._-]{0,64}")
@@ -121,11 +128,20 @@ class Access:
         return [_account(row) for row in rows]
 
     def set_source(self, name: str, source: str) -> None:
-        """Point an existing account at another source; its handle and tokens stay."""
+        """Point an existing account at another source; its handle and tokens stay.
+
+        What was last synced came from the old source, so the account is stale until it
+        is read from the new one.
+        """
         with db.transaction(self._path) as database:
-            if _account_named(database, name) is None:
+            account = _account_named(database, name)
+            if account is None:
                 raise AccessError(f"no account named {name}")
             database.execute("update accounts set source = ? where name = ?", (source, name))
+            database.execute(
+                "update sync_state set status = 'stale' where account_handle = ?",
+                (account.handle,),
+            )
 
     def remove_account(self, name: str) -> None:
         """Remove an account, the items stored for it and its place in every token's scope."""

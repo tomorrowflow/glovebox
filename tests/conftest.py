@@ -28,7 +28,7 @@ class RunningGate:
     url: str
     token: str  # the value of the default token
     db: Path
-    log: Path  # what the service wrote to stdout and stderr
+    log: Path  # what the service wrote to stdout and stderr, across restarts of the same db
     tokens: Mapping[str, str]  # every token the harness issued for this database, by label
 
 
@@ -172,6 +172,7 @@ def start_gate(tmp_path: Path) -> GateStarter:
         accounts: Mapping[str, Path | str] | None = None,
         tokens: Mapping[str, Sequence[str]] | None = None,
         now: str = NOW,
+        extra_env: Mapping[str, str] | None = None,
     ) -> AbstractContextManager[RunningGate]:
         source: Path | str = mail_url or mail_fixture or tmp_path / "no-such-mail.json"
         return run_gate(
@@ -180,6 +181,7 @@ def start_gate(tmp_path: Path) -> GateStarter:
             tokens=tokens,
             default_token=token,
             now=now,
+            extra_env=extra_env,
         )
 
     return start
