@@ -1,17 +1,19 @@
 """Source adapters: the only code that sees raw upstream structure.
 
-An adapter fetches one account's mail and hands the gate normalized records. A
-record holds the upstream keys the handle registry needs and the few values that
-become permitted fields; subjects, bodies, names, recipients, filenames and every
-other upstream value are never read out of the document (ADR 0004). The one exception is
-an item's text, its subject and body: it is read so that the quarantined classifier can
-judge it, held in memory for that, and never stored, logged or served.
+An adapter fetches one account's mail or messenger conversations and hands the gate
+normalized records. A record holds the upstream keys the handle registry needs and the few
+values that become permitted fields; subjects, names, group names, recipients, reactions,
+quotes, previews, filenames, media types and every other upstream value are never read out
+of the document (ADR 0004). The one exception is an item's text, its subject and body or its
+message text and caption: it is read so that the quarantined classifier can judge it, held in
+memory for that, and never stored, logged or served.
 """
 
 import http.client
 import json
 import urllib.error
 import urllib.request
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -23,7 +25,7 @@ from urllib.parse import urlsplit
 from glovebox.credentials import read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
-SourceKind = Literal["fixture_mail"]
+SourceKind = Literal["fixture_mail", "fixture_messenger"]
 # How fresh and complete an account's data is. `current`: the last sync read the whole
 # source. `incomplete`: it did, but some items could not be understood and are missing.
 # `stale`: the last sync failed, so the data is from an earlier one. `blocked`: the last
@@ -54,11 +56,12 @@ class SourceBlocked(SourceError):
 
 @dataclass(frozen=True)
 class SourceItem:
-    """One mail item as the gate keeps it: upstream keys and values that map to permitted fields."""
+    """One mail or messenger item as the gate keeps it: upstream keys and values that map to
+    permitted fields."""
 
     upstream_id: str
     sender_key: str
-    thread_key: str
+    thread_key: str  # a mail thread, or a messenger conversation
     received: datetime  # UTC, truncated to the minute
     read_status: ReadStatus
     has_attachments: bool
@@ -74,11 +77,11 @@ class SourceMailbox:
     skipped: int = 0  # items that could not be understood and were left out
 
 
-class MailSource(Protocol):
+class ItemSource(Protocol):
     kind: SourceKind
 
     def fetch(self) -> SourceMailbox:
-        """Fetch the account's recent mail.
+        """Fetch the account's recent items.
 
         Raises SourceBlocked if access is not granted and SourceError for any other
         failure, never anything with detail.
@@ -86,23 +89,22 @@ class MailSource(Protocol):
         ...
 
 
-class FixtureMailSource:
-    """Mail from a fixture document, read from a file or from a stand-in over HTTP.
+class FixtureSource(ABC):
+    """A fixture document, read from a file or from a stand-in over HTTP, and the way an
+    unreadable one is told apart from one that refuses access. A subclass names the kind
+    and parses the document."""
 
-    The document has the shape the stand-ins serve: an `account` and a list of
-    `messages`. Each message needs `id`, `from` and `received`; `thread`, `read` and
-    `attachments` are optional. A message that cannot be understood is skipped and
-    counted.
-    """
-
-    kind: SourceKind = "fixture_mail"
+    kind: SourceKind
 
     def __init__(self, location: Path | str) -> None:
         self._location = location
 
+    @abstractmethod
+    def parse(self, document: object) -> SourceMailbox: ...
+
     def fetch(self) -> SourceMailbox:
         try:
-            return parse_mailbox(json.loads(self._read()))
+            return self.parse(json.loads(self._read()))
         except SourceError:
             raise
         except urllib.error.HTTPError as error:
@@ -132,6 +134,114 @@ class FixtureMailSource:
         if len(data) > MAX_DOCUMENT_BYTES:
             raise SourceError
         return data
+
+
+class FixtureMailSource(FixtureSource):
+    """Mail from a fixture document.
+
+    The document has the shape the stand-ins serve: an `account` and a list of
+    `messages`. Each message needs `id`, `from` and `received`; `thread`, `read` and
+    `attachments` are optional. A message that cannot be understood is skipped and
+    counted.
+    """
+
+    kind: SourceKind = "fixture_mail"
+
+    def parse(self, document: object) -> SourceMailbox:
+        return parse_mailbox(document)
+
+
+class FixtureMessengerSource(FixtureSource):
+    """Messenger conversations from a fixture document: the pattern of the live messengers.
+
+    The document has the shape the messenger stand-ins serve: an `account` and a list of
+    `conversations`. A conversation needs an `id` and its `messages`, direct or group alike;
+    its other keys (participants, names, topics) are never read. A message needs `from` and
+    `sent`; `id`, `read`, `media`, `text` and `caption` are optional. A conversation or
+    message that cannot be understood is skipped and counted.
+    """
+
+    kind: SourceKind = "fixture_messenger"
+
+    def parse(self, document: object) -> SourceMailbox:
+        return parse_conversations(document)
+
+
+def parse_conversations(document: object) -> SourceMailbox:
+    if not isinstance(document, Mapping):
+        raise SourceError
+    account = document.get("account")
+    conversations = document.get("conversations")
+    if not isinstance(account, str) or not account or not isinstance(conversations, list):
+        raise SourceError
+    items: dict[str, SourceItem] = {}
+    skipped = 0
+    for conversation in conversations:
+        key = conversation.get("id") if isinstance(conversation, Mapping) else None
+        messages = conversation.get("messages") if isinstance(conversation, Mapping) else None
+        if not isinstance(key, str) or not key or not isinstance(messages, list):
+            # What a conversation held cannot be told, so it counts for what it declared.
+            skipped += len(messages) if isinstance(messages, list) else 1
+            continue
+        repeats: dict[tuple[object, object], int] = {}
+        for message in messages:
+            item = parse_chat_message(key, message, repeats)
+            if item is None:
+                skipped += 1
+            elif item.upstream_id not in items:
+                items[item.upstream_id] = item
+    return SourceMailbox(account_key=account, items=list(items.values()), skipped=skipped)
+
+
+def parse_chat_message(
+    conversation: str, message: object, repeats: dict[tuple[object, object], int]
+) -> SourceItem | None:
+    """One message of a conversation. A message without an ID is keyed by who sent it and
+    when, and by how many alike came before it, so that it keeps its handle."""
+    if not isinstance(message, Mapping):
+        return None
+    sent = message.get("sent")
+    received = parse_received(sent)
+    sender_key = chat_sender_key_of(message.get("from"))
+    if received is None or sender_key is None:
+        return None
+    message_id = message.get("id")
+    if isinstance(message_id, str) and message_id:
+        upstream_id = f"{conversation}\0{message_id}"
+    else:
+        position = (sender_key, sent)
+        repeat = repeats.get(position, 0)
+        repeats[position] = repeat + 1
+        upstream_id = f"{conversation}\0{sender_key}\0{sent}\0{repeat}"
+    media = message.get("media")
+    return SourceItem(
+        upstream_id=upstream_id,
+        sender_key=sender_key,
+        thread_key=conversation,
+        received=received,
+        read_status=read_status_of(message.get("read")),
+        # Presence only: what the media is, and what it is called, is never read.
+        has_attachments=isinstance(media, list) and len(media) > 0,
+        text=chat_text_of(message),
+    )
+
+
+def chat_text_of(message: Mapping[str, object]) -> str:
+    """The message text and caption, those of them that are strings, cut to the limit."""
+    parts = [
+        part
+        for part in (message.get("text"), message.get("caption"))
+        if isinstance(part, str) and part
+    ]
+    return "\n\n".join(parts)[:MAX_TEXT_CHARS]
+
+
+def chat_sender_key_of(sender: object) -> str | None:
+    """A sender's account-local identifier (a number or an address), lowercased, so that
+    one participant is one sender."""
+    if not isinstance(sender, str):
+        return None
+    return sender.strip().lower() or None
 
 
 def parse_mailbox(document: object) -> SourceMailbox:
@@ -214,7 +324,13 @@ def parse_received(value: object) -> datetime | None:
         return None
 
 
-def open_source(kind: str, location: str, credentials: Path | None) -> MailSource:
+FIXTURE_SOURCES: dict[str, type[FixtureSource]] = {
+    "fixture_mail": FixtureMailSource,
+    "fixture_messenger": FixtureMessengerSource,
+}
+
+
+def open_source(kind: str, location: str, credentials: Path | None) -> ItemSource:
     """The adapter for one account, once its credentials file has passed the mode check.
 
     Raises CredentialsError, which carries no detail, if the file cannot be used.
@@ -223,7 +339,8 @@ def open_source(kind: str, location: str, credentials: Path | None) -> MailSourc
         # The fixture kind uses no credentials; its file is checked all the same, so the
         # refusal is the same for every kind.
         read_credentials(credentials)
-    if kind == "fixture_mail":
-        is_url = urlsplit(location).scheme in ("http", "https")
-        return FixtureMailSource(location if is_url else Path(location))
-    raise SourceError
+    adapter = FIXTURE_SOURCES.get(kind)
+    if adapter is None:
+        raise SourceError
+    is_url = urlsplit(location).scheme in ("http", "https")
+    return adapter(location if is_url else Path(location))

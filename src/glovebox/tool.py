@@ -65,7 +65,8 @@ READ_ONLY = types.ToolAnnotations(
 
 FILTERS_TEXT = (
     "Filters, all optional and combined with AND: read status, received-time range "
-    "(inclusive, minute precision), attachment presence, sender handle, thread handle, "
+    "(inclusive, minute precision), attachment presence, sender handle, thread handle "
+    "(the conversation handle for messenger items), "
     "account handle and the semantic fields: topic ID, reply needed, action requested, "
     "deadline range and classification status. Semantic fields are untrusted judgments "
     "of a quarantined classifier, `unknown` whenever the gate cannot validate one, and "
@@ -119,8 +120,10 @@ SPECS: dict[str, ToolSpec] = {
     LIST_TOOL: ToolSpec(
         _definition(
             LIST_TOOL,
-            "Lists mail items of the last 30 days with permitted fields only: item handle, "
-            "account handle, source kind, sender handle, thread handle, received time at "
+            "Lists mail and messenger items of the last 30 days, across every account the "
+            "token covers, with permitted fields only: item handle, account handle, source "
+            "kind, sender handle, thread handle (a conversation handle for a messenger item, "
+            "direct or group), received time at "
             "minute precision, read status, attachment presence and the semantic fields "
             "topic, reply needed, action requested, deadline and classification status. "
             f"{FILTERS_TEXT} Fixed sort orders only: received_desc, received_asc, "
@@ -136,7 +139,8 @@ SPECS: dict[str, ToolSpec] = {
     COUNT_TOOL: ToolSpec(
         _definition(
             COUNT_TOOL,
-            f"Counts the mail items of the last 30 days that match the filters. {FILTERS_TEXT} "
+            "Counts the mail and messenger items of the last 30 days that match the filters. "
+            f"{FILTERS_TEXT} "
             f"A count above 1000 is reported as 1000+. {SYNC_TEXT}",
             CountInput,
             CountOutput,
@@ -147,7 +151,8 @@ SPECS: dict[str, ToolSpec] = {
     GROUP_TOOL: ToolSpec(
         _definition(
             GROUP_TOOL,
-            "Counts the mail items of the last 30 days that match the filters, grouped by "
+            "Counts the mail and messenger items of the last 30 days that match the filters, "
+            "grouped by "
             "sender handle, thread handle, read status, source kind, topic, reply needed, "
             "action requested, deadline or classification status. Largest groups first. "
             f"{FILTERS_TEXT} A count above 1000 is reported as 1000+. At most {MAX_ITEMS} "
