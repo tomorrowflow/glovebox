@@ -319,9 +319,15 @@ def dependency_digest() -> str:
 
 
 def gate_settings_digest() -> str:
-    """Changes when the address, port or allowed hosts the gate is started with change."""
+    """Changes when the env file changes, or the address, port or allowed hosts of the gate do.
+
+    The env file reaches the gate whole (the token it registers, the pinned clock and the
+    knobs), and the three computed settings also follow the process environment.
+    """
     _, environment = service_plan("gate")
     digest = hashlib.sha256()
+    for name, value in sorted(read_env_file().items()):
+        digest.update(f"{name}={value}\n".encode())
     for name in GATE_SETTINGS:
         digest.update(f"{name}={environment.get(name, '')}\n".encode())
     return digest.hexdigest()
@@ -332,7 +338,8 @@ def release_fingerprint() -> str:
 
     `serve` restarts a service only when the wanted release changes, so a setting that
     is read from the env file must be part of the release, or `up` would leave the
-    running gate with its old environment. Only a digest is kept, never a value.
+    running gate with its old environment. Only a truncated digest is kept, never a
+    value, so the token and the hosts stay out of the desired file and the pid files.
     """
     head = git("rev-parse", "HEAD").stdout.strip() or "nogit"
     return f"{head}-{dependency_digest()[:12]}-{gate_settings_digest()[:12]}"

@@ -633,12 +633,33 @@ def test_the_release_changes_with_the_gate_settings_the_runner_reads(
     assert len({before, allowed, other_host, published, other_port}) == 5
 
 
+def test_the_release_changes_with_any_setting_in_the_env_file_such_as_a_rotated_token(
+    env: ModuleType, tmp_path: Path
+) -> None:
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=abc123\n")
+    before = env.release_fingerprint()
+
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=def456\n")
+    rotated = env.release_fingerprint()
+    (tmp_path / ".env").write_text(
+        "GLOVEBOX_TEST_TOKEN=def456\nGLOVEBOX_FIXED_NOW=2026-01-10T12:00Z\n"
+    )
+    pinned = env.release_fingerprint()
+
+    assert len({before, rotated, pinned}) == 3
+
+
 def test_the_release_does_not_carry_the_settings_in_the_clear(
     env: ModuleType, tmp_path: Path
 ) -> None:
-    (tmp_path / ".env").write_text("GLOVEBOX_ENV_ALLOWED_HOSTS=florians.ts.net:8765\n")
+    (tmp_path / ".env").write_text(
+        "GLOVEBOX_TEST_TOKEN=abc123xyz\nGLOVEBOX_ENV_ALLOWED_HOSTS=florians.ts.net:8765\n"
+    )
 
-    assert "florians" not in env.release_fingerprint()
+    fingerprint = env.release_fingerprint()
+
+    assert "florians" not in fingerprint
+    assert "abc123xyz" not in fingerprint
 
 
 def test_up_asks_for_a_new_release_when_the_allowed_hosts_in_the_env_file_change(
@@ -706,7 +727,14 @@ def test_a_changed_allowed_host_reaches_the_running_gate_on_the_next_up(
                     "GLOVEBOX_ENV_ALLOWED_HOSTS=florians-mac-mini.tail974337.ts.net:8765\n"
                 )
             assert env.main(["up"]) == 0
-            wait_for(lambda: running_pid(env) != first)
+
+            def restarted() -> bool:
+                try:
+                    return running_pid(env) != first
+                except FileNotFoundError:  # `serve` removes it between the old gate and the new
+                    return False
+
+            wait_for(restarted)
             wait_for(lambda: seen.read_text() == "florians-mac-mini.tail974337.ts.net:8765")
         except BaseException as failure:  # the driver runs in a thread: report it from here
             failures.append(failure)
