@@ -200,7 +200,7 @@ async def observe_gate(gate: RunningGate) -> dict[str, str]:
     Covers the initialize result, the whole tool listing (names, descriptions,
     schemas, annotations, metadata), the read tool's result and the error results
     for a bad call, an unknown tool and the capabilities that are not offered,
-    plus the refusal an unauthenticated request gets.
+    plus the refusal an unauthenticated request gets, and the service's log.
     """
     channels: dict[str, str] = {}
     async with agent_client(gate) as client:
@@ -263,6 +263,7 @@ async def observe_gate(gate: RunningGate) -> dict[str, str]:
         channels["refusal-bad-token"] = (
             f"{bad_token.status_code} {dict(bad_token.headers)} {bad_token.text}"
         )
+    channels["log"] = gate.log.read_text(errors="replace")
     return channels
 
 

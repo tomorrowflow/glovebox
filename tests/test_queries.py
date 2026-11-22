@@ -201,7 +201,7 @@ async def test_count_and_group_apply_the_same_filters(
                 ({"read_status": "read", "has_attachments": True}, "1"),
             ):
                 counted = await call(client, COUNT_TOOL, **filters)
-                assert counted == {"error": "none", "count": expected}, filters
+                assert (counted["error"], counted["count"]) == ("none", expected), filters
                 grouped = await call(client, GROUP_TOOL, group_by="read_status", **filters)
                 total = sum(int(group["count"]) for group in grouped["groups"])
                 assert str(total) == expected, filters
@@ -365,8 +365,12 @@ async def test_the_page_boundary_is_exact(start_gate: GateStarter, tmp_path: Pat
     with publish(start_gate, tmp_path, numbered_mailbox(0)) as gate:
         async with agent_client(gate) as client:
             empty = await call(client, LIST_TOOL)
-            assert empty == {"error": "none", "items": [], "next_cursor": None}
-            assert await call(client, COUNT_TOOL) == {"error": "none", "count": "0"}
+            # An empty inbox is a success whose account is current, unlike an outage.
+            assert (empty["error"], empty["items"], empty["next_cursor"]) == ("none", [], None)
+            assert [account["status"] for account in empty["accounts"]] == ["current"]
+            counted = await call(client, COUNT_TOOL)
+            assert (counted["error"], counted["count"]) == ("none", "0")
+            assert counted["accounts"] == empty["accounts"]
 
 
 @pytest.mark.anyio
@@ -412,9 +416,9 @@ async def test_counts_above_one_thousand_are_reported_as_1000_plus(
         async with agent_client(gate) as client:
             for last, expected in ((0, "1"), (998, "999"), (999, "1000"), (1000, "1000+")):
                 counted = await call(client, COUNT_TOOL, received_to=minute_of(last))
-                assert counted == {"error": "none", "count": expected}, last
+                assert (counted["error"], counted["count"]) == ("none", expected), last
             everything = await call(client, COUNT_TOOL)
-            assert everything == {"error": "none", "count": "1000+"}
+            assert (everything["error"], everything["count"]) == ("none", "1000+")
             grouped = await call(client, GROUP_TOOL, group_by="read_status")
             assert grouped["groups"] == [{"key": "unread", "count": "1000+"}]
             # A page is still 50 items. Walking every page does reveal a total above the
@@ -460,7 +464,12 @@ async def test_a_cursor_is_invalid_for_another_token_identity_and_valid_again_fo
     with start_gate("shared.db", mail_fixture=fixture, token=TOKEN_B) as gate:
         async with agent_client(gate) as client:
             refused = await call(client, LIST_TOOL, cursor=cursor)
-            assert refused == {"error": "invalid_cursor", "items": [], "next_cursor": None}
+            assert refused == {
+                "error": "invalid_cursor",
+                "accounts": [],
+                "items": [],
+                "next_cursor": None,
+            }
             refused_group = await call(
                 client, GROUP_TOOL, group_by="sender_handle", cursor=group_cursor
             )
@@ -799,7 +808,15 @@ async def test_error_results_of_every_tool_are_fixed_values(
                 assert result.is_error is True
                 assert result.content == []
                 assert structured["error"] in ERRORS
-                assert set(structured) <= {"error", "items", "groups", "count", "next_cursor"}
+                assert set(structured) <= {
+                    "error",
+                    "accounts",
+                    "items",
+                    "groups",
+                    "count",
+                    "next_cursor",
+                }
+                assert structured.get("accounts", []) == []
                 seen.add(structured["error"])
                 assert_no_corpus({"result": result.model_dump_json(by_alias=True)})
             assert seen == {"invalid_arguments", "invalid_cursor", "unknown_tool"}

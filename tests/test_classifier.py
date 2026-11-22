@@ -411,7 +411,9 @@ async def test_an_item_the_classifier_cannot_answer_is_unknown_and_unavailable_b
     # The deterministic fields of the items the classifier could not read are still served.
     assert down["received"] == "2026-01-05T09:01Z"
     assert down["read_status"] == "unknown"
-    assert counted == {"error": "none", "count": "3"}
+    assert (counted["error"], counted["count"]) == ("none", "3")
+    # An unavailable classifier is not a source outage: the account itself synced fine.
+    assert [account["status"] for account in counted["accounts"]] == ["current"]
 
 
 @pytest.mark.anyio

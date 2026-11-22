@@ -24,9 +24,20 @@ from glovebox import db
 from glovebox.classification import UNKNOWN, Classification
 from glovebox.db import MINT_ATTEMPTS, new_handle
 from glovebox.fields import ClassificationStatus
-from glovebox.formats import COUNT_CAP, COUNT_CAPPED, WINDOW_DAYS, minute
+from glovebox.formats import (
+    COUNT_CAP,
+    COUNT_CAPPED,
+    SKIPPED_CAP,
+    SKIPPED_CAPPED,
+    WINDOW_DAYS,
+    minute,
+)
 from glovebox.query import Filters, GroupBy, SortOrder
-from glovebox.sources import SourceItem, SourceMailbox
+from glovebox.sources import SourceItem, SourceMailbox, SyncStatus
+
+# What `sync_state.last_sync` holds for an account that has never synced: the column
+# cannot be null, and no minute is ever empty.
+NEVER_SYNCED = ""
 
 # The fixed sort orders, each ending in the item handle so that a page boundary is stable.
 SORT_ORDERS: dict[SortOrder, str] = {
@@ -72,6 +83,7 @@ class PreparedItem:
 class PreparedMailbox:
     account: str
     items: list[PreparedItem]
+    skipped: int = 0  # items the source held that could not be understood
 
 
 class Store:
@@ -111,7 +123,7 @@ class Store:
         with self._transaction() as database:
             known = database.execute("select 1 from accounts where handle = ?", (account,))
             if known.fetchone() is None:
-                return PreparedMailbox(account, [])
+                return PreparedMailbox(account, [], mailbox.skipped)
             key = _meta_key(database, "handle_key")
             content_key = _meta_key(database, "content_key")
             stored = {
@@ -133,7 +145,7 @@ class Store:
                         handle, item, digest, _reusable(stored.get(handle), digest, config_digest)
                     )
                 )
-        return PreparedMailbox(account, items)
+        return PreparedMailbox(account, items, mailbox.skipped)
 
     def commit_mailbox(
         self,
@@ -146,8 +158,9 @@ class Store:
         """Make the account's stored items match one complete fetch, in one transaction.
 
         `classifications` holds one entry per prepared item, in order. Items of any
-        account that have left the window are dropped. An account the operator removed in
-        the meantime is not written to.
+        account that have left the window are dropped. The account is current, or
+        incomplete if the source held items that could not be understood. An account the
+        operator removed in the meantime is not written to.
         """
         window_start, _ = window(synced_at)
         account = prepared.account
@@ -180,10 +193,58 @@ class Store:
                         config_digest,
                     ),
                 )
+            status: SyncStatus = "incomplete" if prepared.skipped else "current"
             database.execute(
-                "insert or replace into sync_state values (?, ?, 'current', ?)",
-                (account, kind, minute(synced_at)),
+                "insert or replace into sync_state"
+                " (account_handle, source_kind, status, last_sync, skipped)"
+                " values (?, ?, ?, ?, ?)",
+                (account, kind, status, minute(synced_at), prepared.skipped),
             )
+
+    def mark_unsynced(self, account: str, kind: str, status: SyncStatus) -> None:
+        """Record that the last sync of the account failed.
+
+        The account keeps its last successful sync time, and its stored items stay as they
+        were. An account that never synced is recorded as such. An account the operator
+        removed in the meantime is not written to.
+        """
+        with self._transaction() as database:
+            known = database.execute("select 1 from accounts where handle = ?", (account,))
+            if known.fetchone() is None:
+                return
+            database.execute(
+                "insert into sync_state (account_handle, source_kind, status, last_sync)"
+                " values (?, ?, ?, ?)"
+                " on conflict (account_handle) do update set status = excluded.status",
+                (account, kind, status, NEVER_SYNCED),
+            )
+
+    def account_sync(self, accounts: Sequence[str]) -> list[dict[str, Any]]:
+        """Each of `accounts` with its sync status, in the order given, as stored.
+
+        An account that never synced is `stale` with no sync time. Nothing here vouches for
+        the values. An account that no longer exists is left out.
+        """
+        marks = ", ".join("?" for _ in accounts)
+        with self._reader() as database:
+            rows = database.execute(
+                "select accounts.handle, accounts.source_kind, sync_state.status,"
+                " sync_state.last_sync, sync_state.skipped from accounts"
+                " left join sync_state on sync_state.account_handle = accounts.handle"
+                f" where accounts.handle in ({marks})",
+                tuple(accounts),
+            ).fetchall()
+        by_handle = {
+            row[0]: {
+                "account_handle": row[0],
+                "source_kind": row[1],
+                "status": "stale" if row[2] is None else row[2],
+                "last_sync": None if row[3] in (None, NEVER_SYNCED) else row[3],
+                "skipped_items": spell_skipped(0 if row[4] is None else row[4]),
+            }
+            for row in rows
+        }
+        return [by_handle[handle] for handle in accounts if handle in by_handle]
 
     def list_items(
         self,
@@ -270,6 +331,13 @@ class Store:
 
 def spell_count(count: int) -> str:
     return COUNT_CAPPED if count > COUNT_CAP else str(count)
+
+
+def spell_skipped(count: object) -> str:
+    """How many items were skipped, as the response spells it: capped at `10+`."""
+    if isinstance(count, int) and count > SKIPPED_CAP:
+        return SKIPPED_CAPPED
+    return str(count)
 
 
 def window(now: datetime) -> tuple[str, str]:

@@ -19,6 +19,8 @@ from glovebox.formats import (
     MINUTE_FORMAT,
     MINUTE_LENGTH,
     MINUTE_PATTERN,
+    SKIPPED_MAX_LENGTH,
+    SKIPPED_PATTERN,
     TOPIC_ID_MAX_LENGTH,
     TOPIC_ID_PATTERN,
 )
@@ -49,6 +51,10 @@ Deadline = Minute | Literal["unknown"]
 # "0" to "1000", or "1000+" for anything above the cap.
 Count = Annotated[
     str, StringConstraints(pattern=COUNT_PATTERN, min_length=1, max_length=COUNT_MAX_LENGTH)
+]
+# "0" to "10", or "10+" for anything above the cap.
+SkippedCount = Annotated[
+    str, StringConstraints(pattern=SKIPPED_PATTERN, min_length=1, max_length=SKIPPED_MAX_LENGTH)
 ]
 Cursor = Annotated[
     str,

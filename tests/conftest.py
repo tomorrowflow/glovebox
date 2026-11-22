@@ -28,7 +28,7 @@ class RunningGate:
     url: str
     token: str  # the value of the default token
     db: Path
-    log: Path  # what the service wrote to stdout and stderr
+    log: Path  # what the service wrote to stdout and stderr, across restarts of the same db
     tokens: Mapping[str, str]  # every token the harness issued for this database, by label
 
 
