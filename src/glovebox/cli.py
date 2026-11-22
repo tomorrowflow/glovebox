@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from glovebox.access import OPERATIONS, Access, AccessError
 from glovebox.config import ConfigError, Settings
 from glovebox.credentials import CredentialsError, read_credentials
-from glovebox.sources import BEARER_KINDS, SOURCE_KINDS, bearer_may_travel
+from glovebox.sources import BEARER_KINDS, SOURCE_KINDS, bridge_problem
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -92,12 +92,10 @@ def _account(args: argparse.Namespace, access: Access, out: TextIO) -> int:
         if args.credentials is not None:
             # Refuse a file that is open to others now, not at the first request.
             read_credentials(args.credentials)
-            if args.kind in BEARER_KINDS and urlsplit(source).scheme in ("http", "https"):
-                if not bearer_may_travel(source):
-                    raise AccessError(
-                        "the bridge token is sent only over https or to this host: "
-                        "use an https source"
-                    )
+        if args.kind in BEARER_KINDS and urlsplit(source).scheme in ("http", "https"):
+            problem = bridge_problem(source, args.credentials is not None)
+            if problem is not None:
+                raise AccessError(problem)
         account = access.add_account(args.name, args.kind, source, args.credentials)
         print(f"added account {account.name} with handle {account.handle}", file=out)
     elif args.action == "list":

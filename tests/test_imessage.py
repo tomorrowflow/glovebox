@@ -29,6 +29,7 @@ import anyio
 import pytest
 
 from glovebox import chatdb
+from glovebox.access import Access
 from tests.client import ACCOUNTS_TOOL, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent_client
 from tests.conftest import GateStarter, RunningGate, operator
 from tests.hostile import CORPUS, assert_no_corpus, observe_gate
@@ -345,6 +346,60 @@ def test_a_bridge_token_is_not_sent_in_clear_beyond_this_host(tmp_path: Path) ->
     assert refused.returncode == 1
     assert "https" in refused.stderr
     assert allowed.returncode == 0, allowed.stderr
+
+
+@pytest.mark.parametrize(
+    "source", ["http://192.0.2.7:9106", "https://bridge.example.test", "http://[2001:db8::7]:9106"]
+)
+def test_a_bridge_on_another_host_cannot_be_added_without_credentials(
+    tmp_path: Path, source: str
+) -> None:
+    refused = operator(
+        tmp_path / "glovebox.db",
+        *("account", "add", "chat", "--kind", IMESSAGE, "--source", source),
+    )
+
+    assert refused.returncode == 1
+    assert "credentials" in refused.stderr
+    assert operator(tmp_path / "glovebox.db", "account", "list").stdout == ""
+
+
+@pytest.mark.parametrize(
+    "source", ["http://127.0.0.1:9106", "http://localhost:9106", "http://[::1]:9106"]
+)
+def test_the_stand_in_and_the_local_database_need_no_credentials(
+    tmp_path: Path, source: str
+) -> None:
+    added = operator(
+        tmp_path / "glovebox.db",
+        *("account", "add", "chat", "--kind", IMESSAGE, "--source", source),
+    )
+    local = operator(
+        tmp_path / "glovebox.db",
+        *("account", "add", "mac", "--kind", IMESSAGE, "--source", str(tmp_path / "chat.db")),
+    )
+
+    assert added.returncode == 0, added.stderr
+    assert local.returncode == 0, local.stderr
+
+
+@pytest.mark.anyio
+async def test_the_gate_never_asks_an_unauthenticated_bridge_on_another_host(
+    start_gate: GateStarter,
+) -> None:
+    """Below the CLI on purpose: an account whose source was re-pointed in the database."""
+    with bridge_serving(triage()) as bridge:
+        with start_gate(accounts={"chat": bridge.url}, kinds={"chat": IMESSAGE}) as gate:
+            async with agent_client(gate) as client:
+                current = account_of(await call(client, LIST_TOOL))
+                # An address that would hang or refuse: only a refusal to ask gives `blocked`.
+                Access(gate.db).set_source("chat", "http://192.0.2.7:9106")
+                result = await call(client, LIST_TOOL)
+
+    assert current["status"] == "current"
+    assert result["error"] == "source_unavailable" and result["items"] == []
+    entry = account_of(result)
+    assert (entry["status"], entry["last_sync"]) == ("blocked", FIRST_SYNC)
 
 
 # --- freshness, blocked, cancellation and restart ---------------------------------------------

@@ -10,6 +10,7 @@ memory for that, and never stored, logged or served.
 """
 
 import http.client
+import ipaddress
 import json
 import urllib.error
 import urllib.request
@@ -188,13 +189,36 @@ class FixtureMessengerSource(FixtureSource):
         return parse_conversations(document)
 
 
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+def is_loopback(location: str) -> bool:
+    """Whether an http(s) location is on this host."""
+    host = urlsplit(location).hostname
+    if host == "localhost":
+        return True
+    try:
+        return host is not None and ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def bearer_may_travel(location: str) -> bool:
     """A bridge token goes only over TLS or to this host, never in clear across a network."""
-    parts = urlsplit(location)
-    return parts.scheme == "https" or parts.hostname in LOOPBACK_HOSTS
+    return urlsplit(location).scheme == "https" or is_loopback(location)
+
+
+def bridge_problem(location: str, has_credentials: bool) -> str | None:
+    """Why a bridge at this http(s) location may not be used, in fixed text, or None.
+
+    A bridge on another host is a separate device: the connection to it is authenticated
+    (ADR 0004, ticket 19), so it needs a credentials file holding its bearer token, and the
+    token goes only over TLS. Only the stand-in and a bridge on this host may go without.
+    """
+    if is_loopback(location):
+        return None
+    if not has_credentials:
+        return "a bridge on another host needs --credentials, a file holding its bearer token"
+    if not bearer_may_travel(location):
+        return "the bridge token is sent only over https or to this host: use an https source"
+    return None
 
 
 class IMessageSource(FixtureSource):
@@ -215,6 +239,10 @@ class IMessageSource(FixtureSource):
     def fetch(self, since: datetime) -> SourceMailbox:
         if isinstance(self._location, Path):
             return self._read_database(self._location, since)
+        if bridge_problem(self._location, self._bearer is not None) is not None:
+            # Also enforced when the account is added; this holds if the stored source or
+            # credentials changed since. Nothing is sent: access is not granted.
+            raise SourceBlocked
         return super().fetch(since)
 
     def _read_database(self, path: Path, since: datetime) -> SourceMailbox:
