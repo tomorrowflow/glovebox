@@ -294,8 +294,11 @@ async def test_one_failing_account_is_named_and_does_not_affect_another_token(
                 well = await call(both, COUNT_TOOL)
                 bob.fault = "unavailable"
                 down = await call(both, COUNT_TOOL)
+                bob_requests = len(bob.requests)
                 async with agent_client(gate, token=gate.tokens["a"]) as only_alice:
                     unaffected = await call(only_alice, COUNT_TOOL)
+                # A token that does not cover an account never causes it to be read.
+                assert len(bob.requests) == bob_requests
                 bob.fault = None
                 up = await call(both, COUNT_TOOL)
 
@@ -309,6 +312,25 @@ async def test_one_failing_account_is_named_and_does_not_affect_another_token(
     assert unaffected["accounts"] == [first]
     assert up == well
     assert_clean(gate, well, down, unaffected, up)
+
+
+@pytest.mark.anyio
+async def test_an_account_pointed_at_another_source_is_stale_until_it_is_read_from_it(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    """Below the seam on purpose: the operator's re-pointing of the account is a database write."""
+    first = write_fixture(tmp_path / "first.json", small_fixture())
+    second = write_fixture(tmp_path / "second.json", small_fixture())
+    with start_gate(mail_fixture=first) as gate:
+        async with agent_client(gate) as client:
+            current = account_of(await call(client, COUNT_TOOL))
+    with start_gate(mail_fixture=second) as gate:
+        async with agent_client(gate) as client:
+            listed = await call(client, ACCOUNTS_TOOL)
+            after = await call(client, COUNT_TOOL)
+
+    assert listed["accounts"] == [{**current, "status": "stale"}]
+    assert account_of(after) == current
 
 
 @pytest.mark.anyio
