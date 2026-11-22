@@ -2,13 +2,15 @@
 
 A gated data layer for self-hosted AI agents. It is meant to serve mail, calendar and messenger data to agents as permitted fields only, so that free-form text an attacker wrote does not cross the gate into the agent's context.
 
-The project is at its first slices through the gate: an MCP client with the configured bearer token connects over Streamable HTTP and queries the items of a fixture mail account, which come back as handles and permitted fields only (item, account, sender and thread handles, source kind, received time at minute precision, read status, attachment presence). Three read tools do it:
+The project is at its first slices through the gate: an MCP client with an operator-issued bearer token connects over Streamable HTTP and queries the items of a fixture mail account, which come back as handles and permitted fields only (item, account, sender and thread handles, source kind, received time at minute precision, read status, attachment presence). Three read tools do it:
 
 - `list_items` filters by read status, received-time range, attachment presence, sender, thread and account handle, sorts in one of four fixed orders, and pages with an opaque cursor.
 - `count_items` counts the items that match the same filters.
 - `group_items` counts them grouped by sender handle, thread handle, read status or source kind.
 
-There is no text or semantic query parameter: inputs are enums, handles, minute timestamps, booleans, a page size of at most 50 and cursors, and anything else is refused with a fixed error code. A response holds at most 50 items or groups, a count above 1000 is reported as `1000+`, a cursor is valid only for the token identity and query it was issued for, and mail older than a rolling 30 days is neither ingested nor served. These limits bound the count, ordering and timing side channels; they do not remove them. The only source is the fixture one the stand-ins serve, and the token is one static value from configuration, so the service listens on loopback by default.
+There is no text or semantic query parameter: inputs are enums, handles, minute timestamps, booleans, a page size of at most 50 and cursors, and anything else is refused with a fixed error code. A response holds at most 50 items or groups, a count above 1000 is reported as `1000+`, a cursor is valid only for the token identity and query it was issued for, and mail older than a rolling 30 days is neither ingested nor served. These limits bound the count, ordering and timing side channels; they do not remove them. The only source is the fixture one the stand-ins serve.
+
+The operator sets the gate up from the command line on the gateway host, outside MCP (`glovebox account ...`, `glovebox token ...`): accounts with credentials files that only the gateway's user may access, and revocable agent tokens scoped to accounts and read operations. A token value is shown once and only a digest is stored; a revoked token is refused on its next request. A fourth tool, `list_accounts`, tells an agent which accounts its token covers (handle and source kind). An account or cursor outside the token's scope is answered exactly like one that does not exist. The service still listens on loopback by default.
 
 ## The guarantee and what it does not claim
 

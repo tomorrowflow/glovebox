@@ -18,14 +18,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import httpx2
 import pytest
 from mcp import Client, types
 from mcp.shared.exceptions import MCPError
 
-from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, READ_TOOLS, agent_client
-from tests.conftest import AGENT_TOKEN, GateStarter, RunningGate
+from tests.client import ALL_TOOLS, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, READ_TOOLS, agent_client
+from tests.conftest import GateStarter, RunningGate
 from tests.hostile import (
     CORPUS,
     OK_CALLS,
@@ -92,6 +93,20 @@ def small_fixture() -> dict[str, object]:
     }
 
 
+def without_unsynced_account(structured: dict[str, Any] | None) -> dict[str, Any]:
+    """The result minus its one account entry, which must say the account never synced."""
+    assert structured is not None
+    (entry,) = structured["accounts"]
+    assert HANDLE.match(entry.pop("account_handle"))
+    assert entry == {
+        "source_kind": "fixture_mail",
+        "status": "stale",
+        "last_sync": None,
+        "skipped_items": "0",
+    }
+    return {name: value for name, value in structured.items() if name != "accounts"}
+
+
 async def read_items(gate: RunningGate) -> list[dict[str, object]]:
     async with agent_client(gate) as client:
         result = await client.call_tool(LIST_TOOL)
@@ -140,21 +155,22 @@ def test_requests_without_a_valid_token_are_rejected_before_any_tool_runs(
 ) -> None:
     call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": LIST_TOOL}}
     accept = {"Accept": "application/json, text/event-stream"}
-    wrong = [
-        {},
-        {"Authorization": "Bearer"},
-        {"Authorization": "Bearer wrong-token-0123456789abcdef"},
-        {"Authorization": f"Bearer {AGENT_TOKEN}x"},
-        {"Authorization": f"Bearer {AGENT_TOKEN[:-1]}"},
-        {"Authorization": f"Basic {AGENT_TOKEN}"},
-        {"Authorization": AGENT_TOKEN},
-        {"X-Api-Key": AGENT_TOKEN},
-    ]
     with (
         counting_source(small_fixture()) as (source_url, source_requests),
         start_gate(mail_url=source_url) as gate,
         httpx2.Client(timeout=30) as http,
     ):
+        token = gate.token
+        wrong = [
+            {},
+            {"Authorization": "Bearer"},
+            {"Authorization": "Bearer wrong-token-0123456789abcdef"},
+            {"Authorization": f"Bearer {token}x"},
+            {"Authorization": f"Bearer {token[:-1]}"},
+            {"Authorization": f"Basic {token}"},
+            {"Authorization": token},
+            {"X-Api-Key": token},
+        ]
         for headers in wrong:
             posted = http.post(gate.url, json=call, headers={**accept, **headers})
             fetched = http.get(gate.url, headers={**accept, **headers})
@@ -165,7 +181,7 @@ def test_requests_without_a_valid_token_are_rejected_before_any_tool_runs(
         assert source_requests == []
 
         authorised = http.post(
-            gate.url, json=call, headers={**accept, "Authorization": f"Bearer {AGENT_TOKEN}"}
+            gate.url, json=call, headers={**accept, "Authorization": f"Bearer {token}"}
         )
         assert authorised.status_code != 401
 
@@ -184,26 +200,9 @@ async def test_a_client_that_sends_no_token_cannot_connect(gate: RunningGate) ->
             await client.list_tools()
 
 
-def test_the_service_refuses_to_start_without_a_usable_token(tmp_path: Path) -> None:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GLOVEBOX_")}
-    env["GLOVEBOX_DB"] = str(tmp_path / "glovebox.db")
-    for token in (None, "", "short", " " * 32):
-        attempt = env if token is None else {**env, "GLOVEBOX_AGENT_TOKEN": token}
-        result = subprocess.run(
-            [sys.executable, "-m", "glovebox"],
-            env=attempt,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        assert result.returncode != 0
-
-
 def test_the_service_refuses_to_start_with_an_unusable_pinned_clock(tmp_path: Path) -> None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GLOVEBOX_")}
     env["GLOVEBOX_DB"] = str(tmp_path / "glovebox.db")
-    env["GLOVEBOX_AGENT_TOKEN"] = AGENT_TOKEN
     for pinned in ("yesterday", "2026-01-10T12:00:00", "2026-13-40T00:00:00Z"):
         result = subprocess.run(
             [sys.executable, "-m", "glovebox"],
@@ -230,7 +229,7 @@ async def test_only_the_read_tools_are_offered_with_closed_schemas(gate: Running
         with pytest.raises(MCPError):
             await client.list_prompts()
 
-    assert [tool.name for tool in tools] == READ_TOOLS
+    assert [tool.name for tool in tools] == ALL_TOOLS
     assert capabilities.resources is None
     assert capabilities.prompts is None
     assert capabilities.tools is not None
@@ -353,21 +352,17 @@ async def test_a_source_that_cannot_be_read_is_a_fixed_error_not_an_empty_inbox(
                 assert result.is_error is True
                 assert result.content == []
                 assert_no_corpus({"result": result.model_dump_json(by_alias=True)})
-            # Nothing ever synced, so there is no account to report on.
-            assert results[LIST_TOOL].structured_content == {
+            assert without_unsynced_account(results[LIST_TOOL].structured_content) == {
                 "error": "source_unavailable",
-                "accounts": [],
                 "items": [],
                 "next_cursor": None,
             }
-            assert results[COUNT_TOOL].structured_content == {
+            assert without_unsynced_account(results[COUNT_TOOL].structured_content) == {
                 "error": "source_unavailable",
-                "accounts": [],
                 "count": "0",
             }
-            assert results[GROUP_TOOL].structured_content == {
+            assert without_unsynced_account(results[GROUP_TOOL].structured_content) == {
                 "error": "source_unavailable",
-                "accounts": [],
                 "groups": [],
                 "next_cursor": None,
             }
@@ -377,10 +372,10 @@ async def test_a_source_that_cannot_be_read_is_a_fixed_error_not_an_empty_inbox(
 
 
 @pytest.mark.anyio
-async def test_only_the_configured_account_is_served_when_the_source_changes(
+async def test_only_the_current_source_of_an_account_is_served_when_it_changes(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:
-    """A database that already holds another account's items must not serve them."""
+    """Items the account's earlier source gave must not be served after it is re-pointed."""
     first = write_fixture(tmp_path / "first.json", small_fixture())
     other = small_fixture()
     other["account"] = "dave@example.test"
@@ -402,7 +397,8 @@ async def test_only_the_configured_account_is_served_when_the_source_changes(
 
     assert len(before) == 3
     assert [item["received"] for item in after] == ["2026-01-07T12:00Z"]
-    assert after[0]["account_handle"] != before[0]["account_handle"]
+    # The account is the operator's, not the source's: the same account keeps its handle.
+    assert after[0]["account_handle"] == before[0]["account_handle"]
     assert back == before
 
 
@@ -558,9 +554,8 @@ async def test_an_unseeded_stand_in_is_a_fixed_error(
                 result = await client.call_tool(LIST_TOOL)
 
     assert result.is_error is True
-    assert result.structured_content == {
+    assert without_unsynced_account(result.structured_content) == {
         "error": "source_unavailable",
-        "accounts": [],
         "items": [],
         "next_cursor": None,
     }

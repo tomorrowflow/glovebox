@@ -284,11 +284,13 @@ def test_the_gate_runs_from_the_venv_on_loopback_with_the_token_and_standin_addr
 
     command, environment = env.service_plan("gate")
 
-    assert command == [str(tmp_path / "venv" / "bin" / "glovebox")]
+    # `--bootstrap-fixture` registers the test token as an issued token for the fixture account.
+    assert command == [str(tmp_path / "venv" / "bin" / "glovebox"), "serve", "--bootstrap-fixture"]
     assert environment["GLOVEBOX_HOST"] == "127.0.0.1"
     assert environment["GLOVEBOX_PORT"] == "8765"
     assert environment["GLOVEBOX_TEST_TOKEN"] == "abc123"
-    assert environment["GLOVEBOX_AGENT_TOKEN"] == "abc123"
+    assert environment["GLOVEBOX_FIXTURE_TOKEN"] == "abc123"
+    assert "GLOVEBOX_AGENT_TOKEN" not in environment
     # Next to the seeded state, which `down` removes.
     assert environment["GLOVEBOX_DB"] == str(tmp_path / "run" / "state" / "glovebox.db")
     assert environment["GLOVEBOX_STANDIN_IMESSAGE"] == "http://127.0.0.1:9106"

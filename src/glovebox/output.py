@@ -15,7 +15,7 @@ from mcp import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from glovebox.fields import Count, Cursor, Handle, Minute, SkippedCount
-from glovebox.formats import MAX_ITEMS
+from glovebox.formats import MAX_ACCOUNTS, MAX_ITEMS
 from glovebox.sources import ReadStatus, SourceKind, SyncStatus
 
 ErrorCode = Literal[
@@ -51,24 +51,28 @@ class MailItem(BaseModel):
     has_attachments: bool
 
 
-class AccountSync(BaseModel):
-    """How fresh one account's data is: a status, the last sync that read the source, and
-    how many items of it could not be understood."""
+class AccountEntry(BaseModel):
+    """One account and how fresh its data is: a status, the last sync that read the
+    source (none if it never has), and how many items of it could not be understood."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     account_handle: Handle
     source_kind: SourceKind
     status: SyncStatus
-    last_sync: Minute
+    last_sync: Minute | None
     skipped_items: SkippedCount
 
 
 class ReadOutput(Output):
-    """What every read tool says about the accounts behind its answer, so that an outage
-    or a stale account is never mistaken for an empty one."""
+    """What every tool that reads accounts says about them, so that an outage or a stale
+    account is never mistaken for an empty one."""
 
-    accounts: list[AccountSync] = Field(default=[], max_length=MAX_ITEMS)
+    accounts: list[AccountEntry] = Field(default=[], max_length=MAX_ACCOUNTS)
+
+
+class AccountsOutput(ReadOutput):
+    pass
 
 
 class ListOutput(ReadOutput):

@@ -25,12 +25,15 @@ from typing import Any
 import anyio
 import pytest
 
-from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent_client
-from tests.conftest import GateStarter, RunningGate
+from tests.client import ACCOUNTS_TOOL, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent_client
+from tests.conftest import DEFAULT_ACCOUNT, GateStarter, RunningGate, operator
 from tests.hostile import CORPUS, OK_CALLS, assert_no_corpus, hostile_mail_fixture, observe_gate
+from tests.test_access import bob_fixture
 from tests.test_gate import HANDLE, MINUTE, small_fixture, write_fixture
 from tests.test_queries import call
 
+# The tools that read a source; the account listing reads none.
+READ_CALLS = {tool: OK_CALLS[tool] for tool in (LIST_TOOL, COUNT_TOOL, GROUP_TOOL)}
 FIRST_SYNC = "2026-01-10T12:00:00Z"
 LATER_SYNC = "2026-01-10T12:30:00Z"
 SYNC_FIELDS = {"account_handle", "source_kind", "status", "last_sync", "skipped_items"}
@@ -122,7 +125,7 @@ def account_of(structured: dict[str, Any]) -> dict[str, Any]:
     account: dict[str, Any] = accounts[0]
     assert set(account) == SYNC_FIELDS
     assert HANDLE.match(account["account_handle"])
-    assert MINUTE.match(account["last_sync"])
+    assert account["last_sync"] is None or MINUTE.match(account["last_sync"])
     return account
 
 
@@ -155,7 +158,7 @@ async def test_an_outage_is_the_fixed_error_with_stale_status_and_ends_without_o
             assert account_of(counted_before) == current
 
             source.fault = fault
-            outage = {tool: await call(client, tool, **OK_CALLS[tool]) for tool in OK_CALLS}
+            outage = {tool: await call(client, tool, **READ_CALLS[tool]) for tool in READ_CALLS}
             for tool, result in outage.items():
                 # Both hold at once: the fixed outage error, and the account's freshness.
                 assert result["error"] == "source_unavailable", tool
@@ -173,26 +176,31 @@ async def test_an_outage_is_the_fixed_error_with_stale_status_and_ends_without_o
             assert account_of(counted_after) == current
 
         log = gate.log.read_text(errors="replace")
-        assert log.count("source sync failed: stale") == 3
+        assert log.count("account fixture sync failed: stale") == 3
         assert_clean(gate, *outage.values(), before, after)
 
 
 @pytest.mark.anyio
-async def test_an_outage_before_any_sync_is_the_fixed_error_and_names_no_account(
-    start_gate: GateStarter,
+@pytest.mark.parametrize(("fault", "status"), [("unavailable", "stale"), ("forbidden", "blocked")])
+async def test_an_account_that_never_synced_reports_its_status_with_no_sync_time(
+    start_gate: GateStarter, fault: str, status: str
 ) -> None:
     with broken_source(small_fixture()) as source:
-        source.fault = "unavailable"
+        source.fault = fault
         with start_gate(mail_url=source.url) as gate:
             async with agent_client(gate) as client:
                 down = await call(client, COUNT_TOOL)
+                listed = await call(client, ACCOUNTS_TOOL)
                 source.fault = None
                 up = await call(client, COUNT_TOOL)
 
-    assert down == {"error": "source_unavailable", "count": "0", "accounts": []}
-    assert up["error"] == "none"
-    assert up["count"] == "3"
-    assert account_of(up)["status"] == "current"
+    assert (down["error"], down["count"]) == ("source_unavailable", "0")
+    never = account_of(down)
+    assert (never["status"], never["last_sync"], never["skipped_items"]) == (status, None, "0")
+    # Listing the accounts reads no source and repeats what the failed read found.
+    assert listed["accounts"] == [never]
+    assert (up["error"], up["count"]) == ("none", "3")
+    assert account_of(up) == {**never, "status": "current", "last_sync": "2026-01-10T12:00Z"}
 
 
 @pytest.mark.anyio
@@ -229,7 +237,7 @@ async def test_a_source_that_refuses_access_is_blocked_and_recovers_when_access_
         async with agent_client(gate) as client:
             current = account_of(await call(client, LIST_TOOL))
             source.fault = fault
-            blocked = {tool: await call(client, tool, **OK_CALLS[tool]) for tool in OK_CALLS}
+            blocked = {tool: await call(client, tool, **READ_CALLS[tool]) for tool in READ_CALLS}
             source.fault = None
             after = await call(client, COUNT_TOOL)
 
@@ -237,8 +245,70 @@ async def test_a_source_that_refuses_access_is_blocked_and_recovers_when_access_
             assert result["error"] == "source_unavailable", tool
             assert account_of(result) == {**current, "status": "blocked"}, tool
         assert account_of(after) == current
-        assert gate.log.read_text(errors="replace").count("source sync failed: blocked") == 3
+        log = gate.log.read_text(errors="replace")
+        assert log.count("account fixture sync failed: blocked") == 3
         assert_clean(gate, *blocked.values(), after)
+
+
+@pytest.mark.anyio
+async def test_an_account_whose_credentials_file_became_open_is_blocked_and_recovers(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    """Below the seam on purpose: the credentials file's mode is how access is withdrawn."""
+    db = tmp_path / "glovebox.db"
+    source = write_fixture(tmp_path / "mail.json", small_fixture())
+    credentials = tmp_path / "credentials"
+    credentials.write_text(CORPUS["marker"])
+    credentials.chmod(0o600)
+    added = operator(
+        db,
+        *("account", "add", DEFAULT_ACCOUNT, "--kind", "fixture_mail", "--source", str(source)),
+        *("--credentials", str(credentials)),
+    )
+    assert added.returncode == 0, added.stderr
+    with start_gate(accounts={DEFAULT_ACCOUNT: source}) as gate:
+        async with agent_client(gate) as client:
+            current = account_of(await call(client, COUNT_TOOL))
+            credentials.chmod(0o640)
+            blocked = await call(client, COUNT_TOOL)
+            credentials.chmod(0o600)
+            after = await call(client, COUNT_TOOL)
+
+    assert blocked["error"] == "source_unavailable"
+    assert account_of(blocked) == {**current, "status": "blocked"}
+    assert account_of(after) == current
+    # The file's contents never reach a result or the log; its mode is named in fixed text.
+    assert_clean(gate, blocked, after)
+
+
+@pytest.mark.anyio
+async def test_one_failing_account_is_named_and_does_not_affect_another_token(
+    start_gate: GateStarter,
+) -> None:
+    with broken_source(small_fixture()) as alice, broken_source(bob_fixture()) as bob:
+        accounts = {"alice": alice.url, "bob": bob.url}
+        with start_gate(
+            accounts=accounts, tokens={"both": ["alice", "bob"], "a": ["alice"]}
+        ) as gate:
+            async with agent_client(gate, token=gate.tokens["both"]) as both:
+                well = await call(both, COUNT_TOOL)
+                bob.fault = "unavailable"
+                down = await call(both, COUNT_TOOL)
+                async with agent_client(gate, token=gate.tokens["a"]) as only_alice:
+                    unaffected = await call(only_alice, COUNT_TOOL)
+                bob.fault = None
+                up = await call(both, COUNT_TOOL)
+
+    assert (well["error"], well["count"]) == ("none", "5")
+    first, second = well["accounts"]
+    assert (first["status"], second["status"]) == ("current", "current")
+    # The whole call fails, and says which account is stale and since when.
+    assert (down["error"], down["count"]) == ("source_unavailable", "0")
+    assert down["accounts"] == [first, {**second, "status": "stale"}]
+    assert (unaffected["error"], unaffected["count"]) == ("none", "3")
+    assert unaffected["accounts"] == [first]
+    assert up == well
+    assert_clean(gate, well, down, unaffected, up)
 
 
 @pytest.mark.anyio
@@ -353,7 +423,7 @@ async def test_a_sync_status_that_fails_validation_is_replaced_by_the_fixed_erro
                     "where account_handle = new.account_handle; end"
                 )
         async with agent_client(gate) as client:
-            results = {tool: await call(client, tool, **OK_CALLS[tool]) for tool in OK_CALLS}
+            results = {tool: await call(client, tool, **READ_CALLS[tool]) for tool in READ_CALLS}
 
     # Nothing of the failed response survives, not even the account that was read.
     assert results[LIST_TOOL] == {
@@ -445,9 +515,9 @@ async def test_a_source_that_is_not_listening_is_an_outage_not_an_empty_inbox(
         async with agent_client(gate) as client:
             result = await call(client, LIST_TOOL)
 
-    assert result == {
-        "error": "source_unavailable",
-        "items": [],
-        "next_cursor": None,
-        "accounts": [],
-    }
+    assert (result["error"], result["items"], result["next_cursor"]) == (
+        "source_unavailable",
+        [],
+        None,
+    )
+    assert account_of(result)["status"] == "stale"

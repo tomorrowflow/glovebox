@@ -14,7 +14,14 @@ import httpx2
 from mcp import types
 from mcp.shared.exceptions import MCPError
 
-from tests.client import COUNT_TOOL, GROUP_TOOL, LIST_TOOL, READ_TOOLS, agent_client
+from tests.client import (
+    ACCOUNTS_TOOL,
+    ALL_TOOLS,
+    COUNT_TOOL,
+    GROUP_TOOL,
+    LIST_TOOL,
+    agent_client,
+)
 from tests.conftest import RunningGate
 
 FRAGMENT_LENGTH = 12
@@ -140,6 +147,7 @@ FILTER_PARAMETERS = (
 
 # One well-formed call of each tool, with every filter unset.
 OK_CALLS: dict[str, dict[str, object]] = {
+    ACCOUNTS_TOOL: {},
     LIST_TOOL: {},
     COUNT_TOOL: {},
     GROUP_TOOL: {"group_by": "sender_handle"},
@@ -153,10 +161,11 @@ def hostile_calls() -> dict[str, tuple[str, dict[str, object]]]:
     """
     calls: dict[str, tuple[str, dict[str, object]]] = {}
     for tool, base in OK_CALLS.items():
-        parameters = [*FILTER_PARAMETERS]
-        if tool != COUNT_TOOL:
+        # The accounts tool takes no parameter at all.
+        parameters = [] if tool == ACCOUNTS_TOOL else [*FILTER_PARAMETERS]
+        if tool in (LIST_TOOL, GROUP_TOOL):
             parameters += ["limit", "cursor"]
-        parameters += {LIST_TOOL: ["sort"], GROUP_TOOL: ["group_by"], COUNT_TOOL: []}[tool]
+        parameters += {LIST_TOOL: ["sort"], GROUP_TOOL: ["group_by"]}.get(tool, [])
         for parameter in parameters:
             for label, text in CORPUS.items():
                 calls[f"{tool} {parameter} {label}"] = (tool, {**base, parameter: text})
@@ -213,7 +222,7 @@ async def observe_gate(gate: RunningGate) -> dict[str, str]:
             channels[f"foreign cursor {tool} {sorted(arguments)}"] = result.model_dump_json(
                 by_alias=True
             )
-        for tool in READ_TOOLS:
+        for tool in ALL_TOOLS:
             result = await client.call_tool(tool, {"query": CORPUS["injection"]})
             channels[f"bad-arguments-{tool}"] = result.model_dump_json(by_alias=True)
         channels["bad-arguments"] = channels[f"bad-arguments-{LIST_TOOL}"]
@@ -234,6 +243,18 @@ async def observe_gate(gate: RunningGate) -> dict[str, str]:
             headers={"Accept": "application/json, text/event-stream"},
         )
         channels["refusal"] = f"{refused.status_code} {dict(refused.headers)} {refused.text}"
+        # A token that is a corpus string is refused without being echoed.
+        bad_token = await http.post(
+            gate.url,
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Authorization": f"Bearer {CORPUS['marker']}",
+            },
+        )
+        channels["refusal-bad-token"] = (
+            f"{bad_token.status_code} {dict(bad_token.headers)} {bad_token.text}"
+        )
     channels["log"] = gate.log.read_text(errors="replace")
     return channels
 
