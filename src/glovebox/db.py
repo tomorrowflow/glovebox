@@ -66,7 +66,8 @@ create table if not exists sync_state (
     account_handle text primary key,
     source_kind text not null,
     status text not null,
-    last_sync text not null
+    last_sync text not null,
+    skipped integer not null default 0
 );
 """
 
@@ -82,6 +83,10 @@ def prepare(path: Path) -> None:
     os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
     with closing(sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)) as database:
         database.executescript(SCHEMA)
+        # A database from before sync counts: add the column the schema now has.
+        columns = {row[1] for row in database.execute("pragma table_info(sync_state)")}
+        if "skipped" not in columns:
+            database.execute("alter table sync_state add column skipped integer not null default 0")
 
 
 @contextmanager

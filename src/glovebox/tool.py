@@ -17,6 +17,7 @@ from glovebox.access import (
     LIST_ACCOUNTS_OPERATION,
     LIST_OPERATION,
     Access,
+    Account,
     Grant,
 )
 from glovebox.credentials import CredentialsError
@@ -41,7 +42,7 @@ from glovebox.query import (
     encode_cursor,
     query_digest,
 )
-from glovebox.sources import SourceError, open_source
+from glovebox.sources import SourceBlocked, SourceError, SyncStatus, open_source
 from glovebox.store import Store
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,15 @@ FILTERS_TEXT = (
     "Filters, all optional and combined with AND: read status, received-time range "
     "(inclusive, minute precision), attachment presence, sender handle, thread handle "
     "and account handle."
+)
+SYNC_FIELDS_TEXT = (
+    "Each account carries its sync status (current, stale, incomplete or blocked), its last "
+    "successful sync time at minute precision (none if it never synced) and a capped count "
+    "of skipped items."
+)
+SYNC_TEXT = (
+    f"{SYNC_FIELDS_TEXT} If an account's source cannot be read, the result is the error "
+    "source_unavailable with those fields, never an empty success."
 )
 
 
@@ -88,8 +98,9 @@ SPECS: dict[str, ToolSpec] = {
         _definition(
             ACCOUNTS_TOOL,
             "Lists the accounts this token covers: account handle and source kind for each. "
-            "Accounts the token does not cover are not listed and cannot be told apart from "
-            "accounts that do not exist.",
+            f"{SYNC_FIELDS_TEXT} The status is as of the last read; this call reads no "
+            "source. Accounts the token does not cover are not listed and cannot be told "
+            "apart from accounts that do not exist.",
             AccountsInput,
             AccountsOutput,
         ),
@@ -105,7 +116,7 @@ SPECS: dict[str, ToolSpec] = {
             f"{FILTERS_TEXT} Fixed sort orders only: received_desc, received_asc, "
             f"unread_first, attachments_first. At most {MAX_ITEMS} items per page; "
             "next_cursor is an opaque cursor for the next page, valid only for the same "
-            "caller and query. No message text is returned.",
+            f"caller and query. {SYNC_TEXT} No message text is returned.",
             ListInput,
             ListOutput,
         ),
@@ -116,7 +127,7 @@ SPECS: dict[str, ToolSpec] = {
         _definition(
             COUNT_TOOL,
             f"Counts the mail items of the last 30 days that match the filters. {FILTERS_TEXT} "
-            "A count above 1000 is reported as 1000+.",
+            f"A count above 1000 is reported as 1000+. {SYNC_TEXT}",
             CountInput,
             CountOutput,
         ),
@@ -130,7 +141,7 @@ SPECS: dict[str, ToolSpec] = {
             "sender handle, thread handle, read status or source kind. Largest groups first. "
             f"{FILTERS_TEXT} A count above 1000 is reported as 1000+. At most {MAX_ITEMS} "
             "groups per page; next_cursor is an opaque cursor for the next page, valid only "
-            "for the same caller and query.",
+            f"for the same caller and query. {SYNC_TEXT}",
             GroupInput,
             GroupOutput,
         ),
@@ -196,14 +207,8 @@ class ReadTool:
             # The message of a validation error quotes the input, so it is dropped.
             return error_result("invalid_arguments", spec.output)
         if isinstance(request, AccountsInput):
-            return success_result(
-                {
-                    "accounts": [
-                        {"account_handle": account.handle, "source_kind": account.kind}
-                        for account in grant.accounts
-                    ]
-                }
-            )
+            handles = [account.handle for account in grant.accounts]
+            return success_result({"accounts": self._store.account_sync(handles)})
         if not isinstance(request, Filters):
             return error_result("internal_error", spec.output)
 
@@ -229,21 +234,34 @@ class ReadTool:
 
         with self._sync:
             fetched = []
+            failed: list[tuple[Account, SyncStatus]] = []
+            # Every selected account is tried, so the result tells how each one stands.
             for account in selected:
                 try:
                     source = open_source(account.kind, account.source, account.credentials)
                     fetched.append((account, source.fetch()))
                 except CredentialsError as error:
                     # The message is fixed text; the account name is the operator's own label.
-                    logger.warning("account %s unavailable: %s", account.name, error)
-                    return error_result("source_unavailable", spec.output)
+                    # A credentials file that cannot be used is access that is not granted.
+                    logger.warning("account %s sync failed: blocked: %s", account.name, error)
+                    failed.append((account, "blocked"))
+                except SourceBlocked:
+                    logger.warning("account %s sync failed: blocked", account.name)
+                    failed.append((account, "blocked"))
                 except SourceError:
-                    logger.warning("account %s unavailable: its source failed", account.name)
-                    return error_result("source_unavailable", spec.output)
+                    logger.warning("account %s sync failed: stale", account.name)
+                    failed.append((account, "stale"))
             now = self._clock()
             for account, mailbox in fetched:
                 self._store.replace_mailbox(account.handle, account.kind, mailbox, now)
+            for account, status in failed:
+                self._store.mark_unsynced(account.handle, account.kind, status)
             handles = [account.handle for account in selected]
+            accounts = self._store.account_sync(handles)
+            if failed:
+                # The fixed outage error and each account's freshness, together: a failed
+                # account is never answered as an empty one.
+                return error_result("source_unavailable", spec.output, accounts)
             if isinstance(request, ListInput) and paging is not None:
                 # One row past the page tells whether there is a next one.
                 rows = self._store.list_items(
@@ -251,7 +269,11 @@ class ReadTool:
                 )
                 items = rows[: request.limit]
                 return success_result(
-                    {"items": items, "next_cursor": paging.next(len(items), len(rows) > len(items))}
+                    {
+                        "accounts": accounts,
+                        "items": items,
+                        "next_cursor": paging.next(len(items), len(rows) > len(items)),
+                    }
                 )
             if isinstance(request, GroupInput) and paging is not None:
                 found = self._store.group_items(
@@ -260,11 +282,14 @@ class ReadTool:
                 groups = found[: request.limit]
                 return success_result(
                     {
+                        "accounts": accounts,
                         "groups": groups,
                         "next_cursor": paging.next(len(groups), len(found) > len(groups)),
                     }
                 )
-            return success_result({"count": self._store.count_items(handles, now, filters)})
+            return success_result(
+                {"accounts": accounts, "count": self._store.count_items(handles, now, filters)}
+            )
 
 
 def _permitted_spec(name: str, operations: frozenset[str]) -> ToolSpec | None:
