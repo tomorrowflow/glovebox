@@ -649,6 +649,53 @@ def test_the_release_changes_with_any_setting_in_the_env_file_such_as_a_rotated_
     assert len({before, rotated, pinned}) == 3
 
 
+def test_clearing_a_setting_in_the_env_file_is_a_new_release_not_the_absent_one(
+    env: ModuleType, tmp_path: Path
+) -> None:
+    token = "GLOVEBOX_TEST_TOKEN=abc123\n"
+    (tmp_path / ".env").write_text(token + "GLOVEBOX_ENV_ALLOWED_HOSTS=a.ts.net:8765\n")
+    set_up = env.release_fingerprint()
+    (tmp_path / ".env").write_text(token + "GLOVEBOX_ENV_ALLOWED_HOSTS=\n")
+    cleared = env.release_fingerprint()
+    (tmp_path / ".env").write_text(token)
+    absent = env.release_fingerprint()
+    (tmp_path / ".env").write_text("# a comment\n" + token + "\n")
+    commented = env.release_fingerprint()
+
+    assert len({set_up, cleared, absent}) == 3
+    assert commented == absent  # comments and blank lines are not settings
+
+
+def test_the_publish_port_is_read_from_the_env_file_like_the_other_knobs(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text("GLOVEBOX_ENV_PUBLISH_PORT=18765\n")
+    probed = []
+
+    def record(url: str, token: str | None) -> str:
+        probed.append(url)
+        return "ok"
+
+    monkeypatch.setattr(env, "probe_gate", record)
+    monkeypatch.setattr(env, "native_standins_status", lambda: "ok")
+
+    _, environment = env.service_plan("gate")
+    env.native_status()
+
+    assert environment["GLOVEBOX_PORT"] == "18765"
+    assert probed == ["http://127.0.0.1:18765/mcp"]
+    # The env file wins over the process environment, as for the other settings.
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "9999")
+    assert env.service_plan("gate")[1]["GLOVEBOX_PORT"] == "18765"
+
+
+def test_a_bad_publish_port_in_the_env_file_is_rejected(env: ModuleType, tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("GLOVEBOX_ENV_PUBLISH_PORT=eighty\n")
+
+    with pytest.raises(SystemExit, match="must be a port number"):
+        env.service_plan("gate")
+
+
 def test_the_release_does_not_carry_the_settings_in_the_clear(
     env: ModuleType, tmp_path: Path
 ) -> None:
@@ -682,21 +729,53 @@ def test_up_asks_for_a_new_release_when_the_allowed_hosts_in_the_env_file_change
     assert env.read_desired() != first
 
 
-def test_a_changed_allowed_host_reaches_the_running_gate_on_the_next_up(
-    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+TAILNET_HOST = "florians-mac-mini.tail974337.ts.net:8765"
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "setting", "started_with", "restarted_with"),
+    [
+        # An allowed host added, a publish port moved, and an allowed host cleared again.
+        (
+            "",
+            f"GLOVEBOX_ENV_ALLOWED_HOSTS={TAILNET_HOST}\n",
+            "GLOVEBOX_ALLOWED_HOSTS",
+            "-",
+            TAILNET_HOST,
+        ),
+        ("", "GLOVEBOX_ENV_PUBLISH_PORT=18765\n", "GLOVEBOX_PORT", "8765", "18765"),
+        (
+            f"GLOVEBOX_ENV_ALLOWED_HOSTS={TAILNET_HOST}\n",
+            "GLOVEBOX_ENV_ALLOWED_HOSTS=\n",
+            "GLOVEBOX_ALLOWED_HOSTS",
+            TAILNET_HOST,
+            "-",
+        ),
+    ],
+    ids=["allowed-host-added", "publish-port-moved", "allowed-host-cleared"],
+)
+def test_a_changed_gate_setting_in_the_env_file_reaches_the_running_gate_on_the_next_up(
+    env: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before: str,
+    after: str,
+    setting: str,
+    started_with: str,
+    restarted_with: str,
 ) -> None:
     """The whole path: `.env`, then `up`, then `serve` restarts the gate with the new setting."""
-    seen = tmp_path / "gate-allowed-hosts"
+    seen = tmp_path / "gate-setting"
     real_plan = env.service_plan
 
     def plan(service: str) -> tuple[list[str], dict[str, str]]:
         _, environment = real_plan(service)
-        # A stand-in gate: it records the allowed hosts it was started with, then sleeps.
+        # A stand-in gate: it records the setting it was started with, then sleeps.
         record = textwrap.dedent(
             f"""\
             import os, pathlib, time
-            hosts = os.environ.get('GLOVEBOX_ALLOWED_HOSTS', '-')
-            pathlib.Path({str(seen)!r}).write_text(hosts)
+            value = os.environ.get({setting!r}, '-')
+            pathlib.Path({str(seen)!r}).write_text(value)
             time.sleep(60)
             """
         )
@@ -712,20 +791,17 @@ def test_a_changed_allowed_host_reaches_the_running_gate_on_the_next_up(
     monkeypatch.setattr(env, "service_plan", plan)
     monkeypatch.setattr(env, "RESTART_DELAY_SECONDS", 0)
     handlers = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGINT)}
-    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=abc123\n")
+    token = "GLOVEBOX_TEST_TOKEN=abc123\n"
+    (tmp_path / ".env").write_text(token + before)
 
     failures: list[BaseException] = []
 
     def script() -> None:
         try:
             assert env.main(["up"]) == 0
-            # Loopback only: the gate is told of no extra host.
-            wait_for(lambda: seen.exists() and seen.read_text() == "-")
+            wait_for(lambda: seen.exists() and seen.read_text() == started_with)
             first = running_pid(env)
-            with (tmp_path / ".env").open("a") as env_file:
-                env_file.write(
-                    "GLOVEBOX_ENV_ALLOWED_HOSTS=florians-mac-mini.tail974337.ts.net:8765\n"
-                )
+            (tmp_path / ".env").write_text(token + after)
             assert env.main(["up"]) == 0
 
             def restarted() -> bool:
@@ -735,7 +811,7 @@ def test_a_changed_allowed_host_reaches_the_running_gate_on_the_next_up(
                     return False
 
             wait_for(restarted)
-            wait_for(lambda: seen.read_text() == "florians-mac-mini.tail974337.ts.net:8765")
+            wait_for(lambda: seen.read_text() == restarted_with)
         except BaseException as failure:  # the driver runs in a thread: report it from here
             failures.append(failure)
 

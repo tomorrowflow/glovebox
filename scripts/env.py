@@ -150,14 +150,18 @@ def ensure_env_file(path: Path) -> bool:
     return True
 
 
-def read_env_file() -> dict[str, str]:
-    """The KEY=VALUE lines of the env file; empty when it is missing or unreadable."""
+def read_env_file(keep_empty: bool = False) -> dict[str, str]:
+    """The KEY=VALUE lines of the env file; empty when it is missing or unreadable.
+
+    A line with an empty value sets nothing and is left out, unless `keep_empty` asks for
+    it: clearing a setting then differs from never having set it.
+    """
     try:
         lines = ENV_FILE.read_text().splitlines()
     except (OSError, ValueError):  # missing, unreadable, or not text
         return {}
     pairs = (line.partition("=") for line in lines)
-    return {key: value for key, _, value in pairs if value}
+    return {key: value for key, separator, value in pairs if separator and (value or keep_empty)}
 
 
 def read_token(name: str) -> str | None:
@@ -219,9 +223,10 @@ def run_command(
         return subprocess.CompletedProcess(command, 127, "", "")
 
 
-def native_gate_port() -> int:
-    raw = os.environ.get("GLOVEBOX_ENV_PUBLISH_PORT", str(GATE_PORT))
-    if not raw.isdecimal():
+def native_gate_port(env: Mapping[str, str]) -> int:
+    """The gate's port, from the same environment as its address and allowed hosts."""
+    raw = env.get("GLOVEBOX_ENV_PUBLISH_PORT", str(GATE_PORT))
+    if not raw.isdecimal() or int(raw) > 65535:
         raise SystemExit("GLOVEBOX_ENV_PUBLISH_PORT must be a port number")
     return int(raw)
 
@@ -293,7 +298,7 @@ def service_plan(service: str) -> tuple[list[str], dict[str, str]]:
     """
     env = native_env()
     if service == "gate":
-        host, port = native_publish_host(env), native_gate_port()
+        host, port = native_publish_host(env), native_gate_port(env)
         env["GLOVEBOX_HOST"] = host
         env["GLOVEBOX_PORT"] = str(port)
         # Only the knob counts: a setting of the gate's own in the daemon's environment is dropped.
@@ -326,7 +331,7 @@ def gate_settings_digest() -> str:
     """
     _, environment = service_plan("gate")
     digest = hashlib.sha256()
-    for name, value in sorted(read_env_file().items()):
+    for name, value in sorted(read_env_file(keep_empty=True).items()):
         digest.update(f"{name}={value}\n".encode())
     for name in GATE_SETTINGS:
         digest.update(f"{name}={environment.get(name, '')}\n".encode())
@@ -423,7 +428,8 @@ def native_standins_status() -> str:
 
 def native_status() -> tuple[str, str]:
     """The gate's status word, probed where it listens, and the stand-ins', over loopback."""
-    url = f"http://{authority(native_publish_host(native_env()), native_gate_port())}{GATE_PATH}"
+    env = native_env()
+    url = f"http://{authority(native_publish_host(env), native_gate_port(env))}{GATE_PATH}"
     return probe_gate(url, read_token(TOKEN_VAR)), native_standins_status()
 
 
