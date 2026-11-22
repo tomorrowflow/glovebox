@@ -9,10 +9,12 @@ by accident.
 """
 
 import os
+from collections.abc import Sequence
 from importlib.metadata import version
 
 from mcp import types
 from mcp.server import Server, ServerRequestContext
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
 from glovebox.access import Access
@@ -23,6 +25,10 @@ from glovebox.config import Settings
 from glovebox.store import Store
 from glovebox.stub import StubClassifier
 from glovebox.tool import ReadTool
+
+# What the SDK allows by default for a gate on loopback, with every port.
+LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 
 
 def build_classifier(settings: Settings, config: ClassifierConfig) -> QuarantinedClassifier:
@@ -58,6 +64,19 @@ def create_server(tool: ReadTool) -> Server:
     )
 
 
+def transport_security(allowed_hosts: Sequence[str]) -> TransportSecuritySettings:
+    """DNS-rebinding protection: loopback hosts and origins, plus exactly the hosts listed.
+
+    A Host header outside the list gets 421. Browser origins stay loopback only: an agent
+    is not a browser, so nothing listed here may be used from a page.
+    """
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[*LOOPBACK_HOSTS, *allowed_hosts],
+        allowed_origins=LOOPBACK_ORIGINS,
+    )
+
+
 def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or Settings.from_env(os.environ)
     config = load_classifier_config(settings.classifier_config)
@@ -69,6 +88,8 @@ def create_app(settings: Settings | None = None) -> Starlette:
         build_classifier(settings, config),
         config,
     )
-    app = create_server(tool).streamable_http_app()
+    app = create_server(tool).streamable_http_app(
+        transport_security=transport_security(settings.allowed_hosts)
+    )
     app.add_middleware(AgentTokenMiddleware, access=access)
     return app

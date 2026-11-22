@@ -1,8 +1,9 @@
 # Where the test tier differs from the throwaway tier (ADR 0007): a fixed gate
 # port instead of a free one, and containers that come back after a reboot.
 #
-# The gate's allowed-hosts setting is loopback only, so the port is published on
-# loopback only.
+# The port is published on loopback only, and the gate serves loopback Host headers
+# only. The tailnet reaches the native test gate on the Mac mini (docs/environments.md);
+# this Docker shape is not published.
 #
 # GLOVEBOX_ENV_PUBLISH_PORT exists so the tooling can be exercised on a
 # throwaway host without taking port 8765; the test host leaves it unset.

@@ -15,8 +15,10 @@ import fcntl
 import getpass
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -26,7 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -54,6 +56,21 @@ SERVICE = "glovebox-test-env.service"
 TIERS = ("throwaway", "test")
 STACK_SERVICES = ("gate", "standins")
 INITIALIZE_ID = 1  # the JSON-RPC id of the initialize request `check` sends
+# The gate settings `up` does not install but the runner passes on; they belong to the release.
+GATE_SETTINGS = ("GLOVEBOX_HOST", "GLOVEBOX_PORT", "GLOVEBOX_ALLOWED_HOSTS")
+GATE_PATH = "/mcp"  # where the gate serves MCP; `check --url` adds it to an origin-only URL
+LOOPBACK = "127.0.0.1"
+# Where the gate may be published besides loopback: the tailnet's own addresses (Tailscale's
+# CGNAT range and its IPv6 range), which only the tailnet can reach.
+TAILNET_NETWORKS = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fd7a:115c:a1e0::/48"),
+)
+# One exact Host header value; the same rule as the gate's GLOVEBOX_ALLOWED_HOSTS
+# (src/glovebox/config.py), checked here so that a bad value fails `up` and not the gate.
+HOST_PATTERN = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[[0-9a-f:]+\])(?::(?P<port>[0-9]{1,5}))?"
+)
 
 # The stand-ins' ports and the variables that tell the gate where they answer. They
 # mirror compose.yaml, where the host is `standins`; natively it is loopback.
@@ -133,14 +150,18 @@ def ensure_env_file(path: Path) -> bool:
     return True
 
 
-def read_env_file() -> dict[str, str]:
-    """The KEY=VALUE lines of the env file; empty when it is missing or unreadable."""
+def read_env_file(keep_empty: bool = False) -> dict[str, str]:
+    """The KEY=VALUE lines of the env file; empty when it is missing or unreadable.
+
+    A line with an empty value sets nothing and is left out, unless `keep_empty` asks for
+    it: clearing a setting then differs from never having set it.
+    """
     try:
         lines = ENV_FILE.read_text().splitlines()
     except (OSError, ValueError):  # missing, unreadable, or not text
         return {}
-    pairs = (line.partition("=") for line in lines)
-    return {key: value for key, _, value in pairs if value}
+    pairs = (line.partition("=") for line in lines if not line.lstrip().startswith("#"))
+    return {key: value for key, separator, value in pairs if separator and (value or keep_empty)}
 
 
 def read_token(name: str) -> str | None:
@@ -202,11 +223,66 @@ def run_command(
         return subprocess.CompletedProcess(command, 127, "", "")
 
 
-def native_gate_port() -> int:
-    raw = os.environ.get("GLOVEBOX_ENV_PUBLISH_PORT", str(GATE_PORT))
-    if not raw.isdecimal():
+def native_gate_port(env: Mapping[str, str]) -> int:
+    """The gate's port, from the same environment as its address and allowed hosts."""
+    raw = env.get("GLOVEBOX_ENV_PUBLISH_PORT", str(GATE_PORT))
+    if not raw.isdecimal() or not 0 < int(raw) <= 65535:
         raise SystemExit("GLOVEBOX_ENV_PUBLISH_PORT must be a port number")
     return int(raw)
+
+
+def native_env() -> dict[str, str]:
+    """The environment the native services get: the process's, overridden by the env file.
+
+    The launchd daemons only have what their plists give them, so the env file is where
+    the operator sets the knobs that need no new bootstrap. A line with an empty value
+    clears the setting, even one the process environment has: the default applies again.
+    """
+    cleared = {name for name, value in read_env_file(keep_empty=True).items() if not value}
+    environment = {**os.environ, **read_env_file()}
+    return {name: value for name, value in environment.items() if name not in cleared}
+
+
+def native_publish_host(env: Mapping[str, str]) -> str:
+    """The address the gate listens on: loopback, or one tailnet address, never a wildcard.
+
+    A tailnet address is only reachable from the tailnet. Anything else, including
+    `0.0.0.0` and `::`, is refused here: wider exposure is not a setting of this tool.
+    """
+    raw = env.get("GLOVEBOX_ENV_PUBLISH_HOST", LOOPBACK)
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        address = None
+    if address is None or not (
+        address.is_loopback or any(address in network for network in TAILNET_NETWORKS)
+    ):
+        raise SystemExit("GLOVEBOX_ENV_PUBLISH_HOST must be a loopback or tailnet IP address")
+    return str(address)
+
+
+def authority(host: str, port: int) -> str:
+    """`host:port` as a Host header or URL shows it: an IPv6 address is bracketed."""
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def native_allowed_hosts(env: Mapping[str, str], host: str, port: int) -> list[str]:
+    """The Host header values the gate serves besides its loopback defaults.
+
+    The ones the operator lists, each exact, and the gate's own address when it is not
+    one of the defaults, so that `check` can probe it. Empty means loopback only.
+    """
+    raw = env.get("GLOVEBOX_ENV_ALLOWED_HOSTS", "")
+    hosts = [entry.strip().lower() for entry in raw.split(",")] if raw.strip() else []
+    matches = [HOST_PATTERN.fullmatch(entry) for entry in hosts]
+    if any(match is None or int(match["port"] or 0) > 65535 for match in matches):
+        raise SystemExit(
+            "GLOVEBOX_ENV_ALLOWED_HOSTS must list exact host names or host:port values,"
+            " separated by commas, without wildcards"
+        )
+    if host not in (LOOPBACK, "::1") and authority(host, port) not in hosts:
+        hosts.append(authority(host, port))
+    return hosts
 
 
 def venv_python() -> Path:
@@ -216,16 +292,22 @@ def venv_python() -> Path:
 def service_plan(service: str) -> tuple[list[str], dict[str, str]]:
     """The command and environment that run one native service.
 
-    Everything binds loopback only, like the Docker test tier (the gate's allowed
-    hosts are loopback only). The stand-ins are reached by their loopback ports. The
-    gate registers the test token as an issued agent token for the fixture account
-    when it starts, and keeps its database next to the seeded state, so `down`
-    removes both.
+    The gate binds loopback unless GLOVEBOX_ENV_PUBLISH_HOST names a tailnet address,
+    and serves loopback Host headers plus exactly those in GLOVEBOX_ENV_ALLOWED_HOSTS
+    (the Mac mini keeps the gate on loopback behind tailnet-only HTTPS). The stand-ins
+    always bind loopback and are reached by their loopback ports. The gate registers
+    the test token as an issued agent token for the fixture account when it starts,
+    and keeps its database next to the seeded state, so `down` removes both.
     """
-    env = {**os.environ, **read_env_file()}
+    env = native_env()
     if service == "gate":
-        env["GLOVEBOX_HOST"] = "127.0.0.1"
-        env["GLOVEBOX_PORT"] = str(native_gate_port())
+        host, port = native_publish_host(env), native_gate_port(env)
+        env["GLOVEBOX_HOST"] = host
+        env["GLOVEBOX_PORT"] = str(port)
+        # Only the knob counts: a setting of the gate's own in the daemon's environment is dropped.
+        env.pop("GLOVEBOX_ALLOWED_HOSTS", None)
+        if allowed := native_allowed_hosts(env, host, port):
+            env["GLOVEBOX_ALLOWED_HOSTS"] = ",".join(allowed)
         env["GLOVEBOX_DB"] = str(SEED_STATE.parent / "glovebox.db")
         if TOKEN_VAR in env:
             env["GLOVEBOX_FIXTURE_TOKEN"] = env[TOKEN_VAR]
@@ -244,10 +326,31 @@ def dependency_digest() -> str:
     return digest.hexdigest()
 
 
+def gate_settings_digest() -> str:
+    """Changes when the env file changes, or the address, port or allowed hosts of the gate do.
+
+    The env file reaches the gate whole (the token it registers, the pinned clock and the
+    knobs), and the three computed settings also follow the process environment.
+    """
+    _, environment = service_plan("gate")
+    digest = hashlib.sha256()
+    for name, value in sorted(read_env_file(keep_empty=True).items()):
+        digest.update(f"{name}={value}\n".encode())
+    for name in GATE_SETTINGS:
+        digest.update(f"{name}={environment.get(name, '')}\n".encode())
+    return digest.hexdigest()
+
+
 def release_fingerprint() -> str:
-    """Changes when the checked-out commit or the pinned dependencies change."""
+    """Changes when the commit, the pinned dependencies or the gate's settings change.
+
+    `serve` restarts a service only when the wanted release changes, so a setting that
+    is read from the env file must be part of the release, or `up` would leave the
+    running gate with its old environment. Only a truncated digest is kept, never a
+    value, so the token and the hosts stay out of the desired file and the pid files.
+    """
     head = git("rev-parse", "HEAD").stdout.strip() or "nogit"
-    return f"{head}-{dependency_digest()[:12]}"
+    return f"{head}-{dependency_digest()[:12]}-{gate_settings_digest()[:12]}"
 
 
 def install_dependencies() -> bool:
@@ -327,8 +430,9 @@ def native_standins_status() -> str:
 
 
 def native_status() -> tuple[str, str]:
-    """The gate's and the stand-ins' status words, probed over loopback."""
-    url = f"http://127.0.0.1:{native_gate_port()}/mcp"
+    """The gate's status word, probed where it listens, and the stand-ins', over loopback."""
+    env = native_env()
+    url = f"http://{authority(native_publish_host(env), native_gate_port(env))}{GATE_PATH}"
     return probe_gate(url, read_token(TOKEN_VAR)), native_standins_status()
 
 
@@ -343,6 +447,7 @@ def native_up() -> int:
     if sys.version_info < MIN_PYTHON:
         print("up: python 3.12 or newer is required")
         return 1
+    service_plan("gate")  # refuses a bad publish host or allowed host before anything changes
     if not install_dependencies() or not native_seed():
         return 1
     wanted = f"up {release_fingerprint()}"
@@ -610,10 +715,21 @@ def local_gate_url(tier: str) -> str | None:
     return f"http://127.0.0.1:{port}/mcp"
 
 
+def gate_url(url: str) -> str:
+    """The URL to probe: an origin-only URL gets the gate's MCP path, any other path stays."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url  # the probe reports it
+    if parts.scheme in ("http", "https") and parts.netloc and parts.path in ("", "/"):
+        return urllib.parse.urlunsplit(parts._replace(path=GATE_PATH))
+    return url
+
+
 def command_check(args: argparse.Namespace) -> int:
     standins = "ok"
     if args.url is not None:
-        gate = probe_gate(args.url, os.environ.get(args.token_env))
+        gate = probe_gate(gate_url(args.url), os.environ.get(args.token_env))
     else:
         tier = resolve_tier(args.tier)
         if backend(tier) == "native":

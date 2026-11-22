@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from glovebox.config import HOST_PATTERN, ConfigError, parse_allowed_hosts
 from tests.test_env_file import ROOT, load_env_module
 from tests.test_standins import STANDINS, load_module
 
@@ -307,6 +308,163 @@ def test_the_gate_port_follows_the_publish_port_knob(
     assert environment["GLOVEBOX_PORT"] == "18765"
 
 
+def test_the_gate_defaults_to_loopback_with_no_extra_allowed_hosts(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An ambient setting of the gate's own is not passed through: only the knobs count.
+    monkeypatch.setenv("GLOVEBOX_ALLOWED_HOSTS", "*")
+
+    _, environment = env.service_plan("gate")
+
+    assert environment["GLOVEBOX_HOST"] == "127.0.0.1"
+    assert "GLOVEBOX_ALLOWED_HOSTS" not in environment
+
+
+def test_the_allowed_hosts_knob_reaches_the_gate_from_the_environment_or_the_env_file(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", "a.ts.net:8765")
+    _, from_environment = env.service_plan("gate")
+
+    # The daemon's environment comes from its plist, so the env file is where the operator sets it.
+    monkeypatch.delenv("GLOVEBOX_ENV_ALLOWED_HOSTS")
+    (tmp_path / ".env").write_text("GLOVEBOX_ENV_ALLOWED_HOSTS=b.ts.net:8765, c.ts.net:8765\n")
+    _, from_file = env.service_plan("gate")
+
+    assert from_environment["GLOVEBOX_ALLOWED_HOSTS"] == "a.ts.net:8765"
+    assert from_file["GLOVEBOX_ALLOWED_HOSTS"] == "b.ts.net:8765,c.ts.net:8765"
+    assert from_file["GLOVEBOX_HOST"] == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["*", "*.ts.net", "host.ts.net:*", "a.ts.net,*", "a.ts.net,,b.ts.net", "https://a.ts.net:8765"],
+)
+def test_a_wildcard_or_malformed_allowed_host_is_rejected(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", value)
+
+    with pytest.raises(SystemExit, match="GLOVEBOX_ENV_ALLOWED_HOSTS"):
+        env.service_plan("gate")
+
+
+@pytest.mark.parametrize("value", ["a.ts.net:8765", "A.ts.net", "[::1]:8765", "a.ts.net:8765,b"])
+def test_the_runner_accepts_what_the_gate_accepts(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", value)
+    _, environment = env.service_plan("gate")
+
+    assert parse_allowed_hosts(environment["GLOVEBOX_ALLOWED_HOSTS"])
+
+
+def test_the_runner_and_the_gate_share_one_host_pattern(env: ModuleType) -> None:
+    assert env.HOST_PATTERN.pattern == HOST_PATTERN.pattern
+
+
+@pytest.mark.parametrize(
+    "value", ["*", "a.ts.net:*", "a.ts.net:99999", "[::1]:99999", "a.ts.net/mcp", "a b"]
+)
+def test_the_runner_refuses_what_the_gate_refuses_so_up_fails_at_once(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", value)
+
+    with pytest.raises(ConfigError):
+        parse_allowed_hosts(value)
+    with pytest.raises(SystemExit):
+        env.service_plan("gate")
+
+
+@pytest.mark.parametrize(
+    ("address", "allowed"),
+    [
+        ("127.0.0.1", None),
+        ("::1", None),
+        # The gate answers loopback by default, but only 127.0.0.1 and ::1 by name.
+        ("127.0.0.2", "127.0.0.2:8765"),
+        ("100.101.102.103", "100.101.102.103:8765"),
+        ("fd7a:115c:a1e0::1", "[fd7a:115c:a1e0::1]:8765"),
+    ],
+)
+def test_the_publish_host_knob_moves_the_gate_to_a_loopback_or_tailnet_address(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, address: str, allowed: str | None
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", address)
+
+    _, environment = env.service_plan("gate")
+
+    assert environment["GLOVEBOX_HOST"] == address
+    # A gate bound off 127.0.0.1 must answer its own address, so that `check` can probe it.
+    assert environment.get("GLOVEBOX_ALLOWED_HOSTS") == allowed
+
+
+def test_the_published_address_joins_the_configured_hosts_without_repeating_one(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "100.101.102.103")
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "18765")
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", "a.ts.net:18765,100.101.102.103:18765")
+
+    _, environment = env.service_plan("gate")
+
+    assert environment["GLOVEBOX_ALLOWED_HOSTS"] == "a.ts.net:18765,100.101.102.103:18765"
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["", "0.0.0.0", "::", "192.168.1.5", "8.8.8.8", "10.0.0.1", "localhost", "a.ts.net", "[::1]"],
+)
+def test_a_wildcard_or_public_publish_host_is_rejected(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", address)
+
+    with pytest.raises(SystemExit, match="GLOVEBOX_ENV_PUBLISH_HOST"):
+        env.service_plan("gate")
+
+
+def test_the_stand_ins_stay_on_loopback_whatever_the_gate_publishes(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "100.101.102.103")
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", "a.ts.net:8765")
+
+    _, standins = env.service_plan("standins")
+    _, gate = env.service_plan("gate")
+
+    assert standins["STANDINS_HOST"] == "127.0.0.1"
+    assert "GLOVEBOX_ALLOWED_HOSTS" not in standins
+    assert gate["GLOVEBOX_STANDIN_MAILBOX_MAIL"] == "http://127.0.0.1:9101"
+
+
+def test_the_local_check_probes_the_address_the_gate_is_published_on(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probed = []
+
+    def record(url: str, token: str | None) -> str:
+        probed.append(url)
+        return "ok"
+
+    monkeypatch.setattr(env, "probe_gate", record)
+    monkeypatch.setattr(env, "native_standins_status", lambda: "ok")
+
+    env.native_status()
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "100.101.102.103")
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "18765")
+    env.native_status()
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "::1")
+    env.native_status()
+
+    assert probed == [
+        "http://127.0.0.1:8765/mcp",
+        "http://100.101.102.103:18765/mcp",
+        "http://[::1]:18765/mcp",
+    ]
+
+
 def test_the_standins_run_from_the_checkout_on_loopback_over_the_seeded_state(
     env: ModuleType, tmp_path: Path
 ) -> None:
@@ -451,6 +609,249 @@ def test_up_installs_seeds_and_asks_for_the_release_it_ran(
     assert env.read_env_file()["GLOVEBOX_TEST_TOKEN"]
 
 
+def test_the_release_changes_with_the_gate_settings_the_runner_reads(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=abc123\n")
+    before = env.release_fingerprint()
+    assert env.release_fingerprint() == before  # nothing changed: the same release
+
+    (tmp_path / ".env").write_text(
+        "GLOVEBOX_TEST_TOKEN=abc123\nGLOVEBOX_ENV_ALLOWED_HOSTS=a.ts.net:8765\n"
+    )
+    allowed = env.release_fingerprint()
+    (tmp_path / ".env").write_text(
+        "GLOVEBOX_TEST_TOKEN=abc123\nGLOVEBOX_ENV_ALLOWED_HOSTS=b.ts.net:8765\n"
+    )
+    other_host = env.release_fingerprint()
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "100.101.102.103")
+    published = env.release_fingerprint()
+    monkeypatch.delenv("GLOVEBOX_ENV_PUBLISH_HOST")
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "18765")
+    other_port = env.release_fingerprint()
+
+    assert len({before, allowed, other_host, published, other_port}) == 5
+
+
+def test_the_release_changes_with_any_setting_in_the_env_file_such_as_a_rotated_token(
+    env: ModuleType, tmp_path: Path
+) -> None:
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=abc123\n")
+    before = env.release_fingerprint()
+
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=def456\n")
+    rotated = env.release_fingerprint()
+    (tmp_path / ".env").write_text(
+        "GLOVEBOX_TEST_TOKEN=def456\nGLOVEBOX_FIXED_NOW=2026-01-10T12:00Z\n"
+    )
+    pinned = env.release_fingerprint()
+
+    assert len({before, rotated, pinned}) == 3
+
+
+def test_clearing_a_setting_in_the_env_file_is_a_new_release_not_the_absent_one(
+    env: ModuleType, tmp_path: Path
+) -> None:
+    token = "GLOVEBOX_TEST_TOKEN=abc123\n"
+    (tmp_path / ".env").write_text(token + "GLOVEBOX_ENV_ALLOWED_HOSTS=a.ts.net:8765\n")
+    set_up = env.release_fingerprint()
+    (tmp_path / ".env").write_text(token + "GLOVEBOX_ENV_ALLOWED_HOSTS=\n")
+    cleared = env.release_fingerprint()
+    (tmp_path / ".env").write_text(token)
+    absent = env.release_fingerprint()
+    (tmp_path / ".env").write_text("# a comment\n" + token + "\n")
+    commented = env.release_fingerprint()
+
+    assert len({set_up, cleared, absent}) == 3
+    assert commented == absent  # comments and blank lines are not settings
+
+
+def test_the_publish_port_is_read_from_the_env_file_like_the_other_knobs(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text("GLOVEBOX_ENV_PUBLISH_PORT=18765\n")
+    probed = []
+
+    def record(url: str, token: str | None) -> str:
+        probed.append(url)
+        return "ok"
+
+    monkeypatch.setattr(env, "probe_gate", record)
+    monkeypatch.setattr(env, "native_standins_status", lambda: "ok")
+
+    _, environment = env.service_plan("gate")
+    env.native_status()
+
+    assert environment["GLOVEBOX_PORT"] == "18765"
+    assert probed == ["http://127.0.0.1:18765/mcp"]
+    # The env file wins over the process environment, as for the other settings.
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "9999")
+    assert env.service_plan("gate")[1]["GLOVEBOX_PORT"] == "18765"
+
+
+@pytest.mark.parametrize("port", ["eighty", "0", "65536"])
+def test_a_bad_publish_port_in_the_env_file_is_rejected(
+    env: ModuleType, tmp_path: Path, port: str
+) -> None:
+    (tmp_path / ".env").write_text(f"GLOVEBOX_ENV_PUBLISH_PORT={port}\n")
+
+    with pytest.raises(SystemExit, match="must be a port number"):
+        env.service_plan("gate")
+
+
+def test_an_empty_setting_in_the_env_file_restores_the_default_over_the_process_environment(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GLOVEBOX_ENV_ALLOWED_HOSTS", "a.ts.net:8765")
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_PORT", "18765")
+    (tmp_path / ".env").write_text("GLOVEBOX_ENV_ALLOWED_HOSTS=\nGLOVEBOX_ENV_PUBLISH_PORT=\n")
+
+    _, environment = env.service_plan("gate")
+
+    assert "GLOVEBOX_ALLOWED_HOSTS" not in environment
+    assert environment["GLOVEBOX_PORT"] == "8765"
+
+
+def test_a_commented_out_setting_in_the_env_file_is_not_a_setting(
+    env: ModuleType, tmp_path: Path
+) -> None:
+    token = "GLOVEBOX_TEST_TOKEN=abc123\n"
+    (tmp_path / ".env").write_text(token)
+    plain = env.release_fingerprint()
+
+    (tmp_path / ".env").write_text("# GLOVEBOX_ENV_ALLOWED_HOSTS=\n" + token)
+
+    assert env.release_fingerprint() == plain
+    assert "# GLOVEBOX_ENV_ALLOWED_HOSTS" not in env.read_env_file(keep_empty=True)
+
+
+def test_the_release_does_not_carry_the_settings_in_the_clear(
+    env: ModuleType, tmp_path: Path
+) -> None:
+    (tmp_path / ".env").write_text(
+        "GLOVEBOX_TEST_TOKEN=abc123xyz\nGLOVEBOX_ENV_ALLOWED_HOSTS=florians.ts.net:8765\n"
+    )
+
+    fingerprint = env.release_fingerprint()
+
+    assert "florians" not in fingerprint
+    assert "abc123xyz" not in fingerprint
+
+
+def test_up_asks_for_a_new_release_when_the_allowed_hosts_in_the_env_file_change(
+    env: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(env, "install_dependencies", lambda: True)
+    monkeypatch.setattr(env, "native_seed", lambda: True)
+    monkeypatch.setattr(env, "native_status", lambda: ("ok", "ok"))
+    monkeypatch.setattr(env, "running_release", lambda service: env.read_desired())
+    (tmp_path / ".env").write_text("GLOVEBOX_TEST_TOKEN=abc123\n")
+    assert env.main(["up"]) == 0
+    first = env.read_desired()
+    assert env.main(["up"]) == 0
+    assert env.read_desired() == first  # the same settings: the same release, nothing restarts
+
+    with (tmp_path / ".env").open("a") as env_file:
+        env_file.write("GLOVEBOX_ENV_ALLOWED_HOSTS=florians-mac-mini.tail974337.ts.net:8765\n")
+    assert env.main(["up"]) == 0
+
+    assert env.read_desired() != first
+
+
+TAILNET_HOST = "florians-mac-mini.tail974337.ts.net:8765"
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "setting", "started_with", "restarted_with"),
+    [
+        # An allowed host added, a publish port moved, and an allowed host cleared again.
+        (
+            "",
+            f"GLOVEBOX_ENV_ALLOWED_HOSTS={TAILNET_HOST}\n",
+            "GLOVEBOX_ALLOWED_HOSTS",
+            "-",
+            TAILNET_HOST,
+        ),
+        ("", "GLOVEBOX_ENV_PUBLISH_PORT=18765\n", "GLOVEBOX_PORT", "8765", "18765"),
+        (
+            f"GLOVEBOX_ENV_ALLOWED_HOSTS={TAILNET_HOST}\n",
+            "GLOVEBOX_ENV_ALLOWED_HOSTS=\n",
+            "GLOVEBOX_ALLOWED_HOSTS",
+            TAILNET_HOST,
+            "-",
+        ),
+    ],
+    ids=["allowed-host-added", "publish-port-moved", "allowed-host-cleared"],
+)
+def test_a_changed_gate_setting_in_the_env_file_reaches_the_running_gate_on_the_next_up(
+    env: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before: str,
+    after: str,
+    setting: str,
+    started_with: str,
+    restarted_with: str,
+) -> None:
+    """The whole path: `.env`, then `up`, then `serve` restarts the gate with the new setting."""
+    seen = tmp_path / "gate-setting"
+    real_plan = env.service_plan
+
+    def plan(service: str) -> tuple[list[str], dict[str, str]]:
+        _, environment = real_plan(service)
+        # A stand-in gate: it records the setting it was started with, then sleeps.
+        record = textwrap.dedent(
+            f"""\
+            import os, pathlib, time
+            value = os.environ.get({setting!r}, '-')
+            pathlib.Path({str(seen)!r}).write_text(value)
+            time.sleep(60)
+            """
+        )
+        return [sys.executable, "-c", record], environment
+
+    python = tmp_path / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setattr(env, "install_dependencies", lambda: True)
+    monkeypatch.setattr(env, "native_seed", lambda: True)
+    monkeypatch.setattr(env, "native_status", lambda: ("ok", "ok"))
+    monkeypatch.setattr(env, "running_release", lambda service: env.read_desired())
+    monkeypatch.setattr(env, "service_plan", plan)
+    monkeypatch.setattr(env, "RESTART_DELAY_SECONDS", 0)
+    handlers = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGINT)}
+    token = "GLOVEBOX_TEST_TOKEN=abc123\n"
+    (tmp_path / ".env").write_text(token + before)
+
+    failures: list[BaseException] = []
+
+    def script() -> None:
+        try:
+            assert env.main(["up"]) == 0
+            wait_for(lambda: seen.exists() and seen.read_text() == started_with)
+            first = running_pid(env)
+            (tmp_path / ".env").write_text(token + after)
+            assert env.main(["up"]) == 0
+
+            def restarted() -> bool:
+                try:
+                    return running_pid(env) != first
+                except FileNotFoundError:  # `serve` removes it between the old gate and the new
+                    return False
+
+            wait_for(restarted)
+            wait_for(lambda: seen.read_text() == restarted_with)
+        except BaseException as failure:  # the driver runs in a thread: report it from here
+            failures.append(failure)
+
+    try:
+        assert run_serve(env, script) == 0
+    finally:
+        for number, handler in handlers.items():
+            signal.signal(number, handler)
+    assert failures == []
+
+
 def test_up_reports_a_start_that_never_became_healthy(
     env: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -490,6 +891,21 @@ def test_up_stops_at_a_failed_install(
 
     assert env.read_desired() == ""
     assert "up: ok" not in capsys.readouterr().out
+
+
+def test_up_refuses_a_wildcard_publish_host_before_it_installs_or_asks_for_anything(
+    env: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = Recorder()
+    monkeypatch.setattr(env, "run_command", recorder)
+    monkeypatch.setattr(env, "install_dependencies", lambda: pytest.fail("installed"))
+    monkeypatch.setenv("GLOVEBOX_ENV_PUBLISH_HOST", "0.0.0.0")
+
+    with pytest.raises(SystemExit, match="GLOVEBOX_ENV_PUBLISH_HOST"):
+        env.main(["up"])
+
+    assert recorder.commands == []
+    assert env.read_desired() == ""
 
 
 def test_dependencies_install_once_per_set_of_pins(
