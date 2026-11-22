@@ -1,14 +1,10 @@
 """Service configuration, read once from the environment at startup."""
 
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
 
-MIN_TOKEN_LENGTH = 16
-TOKEN_PATTERN = re.compile(r"[\x21-\x7e]+")  # printable ASCII, no whitespace
 DEFAULT_DB = "glovebox.db"
 
 
@@ -18,10 +14,7 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Settings:
-    agent_token: str
     db_path: Path
-    mail_url: str | None
-    mail_fixture: Path | None
     # Pins the clock the 30-day window is measured from. For tests and fixture stacks only:
     # real time is used when this is unset.
     fixed_now: datetime | None = None
@@ -32,25 +25,8 @@ class Settings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
-        token = env.get("GLOVEBOX_AGENT_TOKEN", "")
-        if len(token) < MIN_TOKEN_LENGTH or not TOKEN_PATTERN.fullmatch(token):
-            raise ConfigError(
-                f"GLOVEBOX_AGENT_TOKEN must be at least {MIN_TOKEN_LENGTH} printable "
-                "characters without whitespace"
-            )
-        mail_url = env.get("GLOVEBOX_STANDIN_MAILBOX_MAIL") or None
-        mail_fixture = env.get("GLOVEBOX_MAIL_FIXTURE") or None
-        if mail_url is not None and mail_fixture is not None:
-            raise ConfigError(
-                "set only one of GLOVEBOX_STANDIN_MAILBOX_MAIL and GLOVEBOX_MAIL_FIXTURE"
-            )
-        if mail_url is not None and urlsplit(mail_url).scheme not in ("http", "https"):
-            raise ConfigError("GLOVEBOX_STANDIN_MAILBOX_MAIL must be an http or https URL")
         return cls(
-            agent_token=token,
             db_path=Path(env.get("GLOVEBOX_DB") or DEFAULT_DB),
-            mail_url=mail_url,
-            mail_fixture=Path(mail_fixture) if mail_fixture else None,
             fixed_now=parse_fixed_now(env.get("GLOVEBOX_FIXED_NOW")),
         )
 

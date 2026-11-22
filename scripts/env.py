@@ -218,8 +218,9 @@ def service_plan(service: str) -> tuple[list[str], dict[str, str]]:
 
     Everything binds loopback only, like the Docker test tier (the gate's allowed
     hosts are loopback only). The stand-ins are reached by their loopback ports. The
-    gate enforces the test token as its one agent token and keeps its database next
-    to the seeded state, so `down` removes both.
+    gate registers the test token as an issued agent token for the fixture account
+    when it starts, and keeps its database next to the seeded state, so `down`
+    removes both.
     """
     env = {**os.environ, **read_env_file()}
     if service == "gate":
@@ -227,10 +228,10 @@ def service_plan(service: str) -> tuple[list[str], dict[str, str]]:
         env["GLOVEBOX_PORT"] = str(native_gate_port())
         env["GLOVEBOX_DB"] = str(SEED_STATE.parent / "glovebox.db")
         if TOKEN_VAR in env:
-            env["GLOVEBOX_AGENT_TOKEN"] = env[TOKEN_VAR]
+            env["GLOVEBOX_FIXTURE_TOKEN"] = env[TOKEN_VAR]
         for name, port in STANDIN_VARS.items():
             env[name] = f"http://127.0.0.1:{port}"
-        return [str(VENV / "bin" / "glovebox")], env
+        return [str(VENV / "bin" / "glovebox"), "serve", "--bootstrap-fixture"], env
     env["STANDINS_HOST"] = "127.0.0.1"
     env["STANDINS_STATE"] = str(SEED_STATE)
     return [str(venv_python()), str(REPO / "deploy" / "standins" / "standins.py")], env
