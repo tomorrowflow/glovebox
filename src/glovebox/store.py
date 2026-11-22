@@ -33,7 +33,7 @@ from glovebox.formats import (
     minute,
 )
 from glovebox.query import Filters, GroupBy, SortOrder
-from glovebox.sources import SourceItem, SourceMailbox, SyncStatus
+from glovebox.sources import READ_ONLY_ENFORCEMENT, SourceItem, SourceMailbox, SyncStatus
 
 # What `sync_state.last_sync` holds for an account that has never synced: the column
 # cannot be null, and no minute is ever empty.
@@ -238,6 +238,7 @@ class Store:
             row[0]: {
                 "account_handle": row[0],
                 "source_kind": row[1],
+                "read_only_enforcement": READ_ONLY_ENFORCEMENT.get(row[1], "gateway"),
                 "status": "stale" if row[2] is None else row[2],
                 "last_sync": None if row[3] in (None, NEVER_SYNCED) else row[3],
                 "skipped_items": spell_skipped(0 if row[4] is None else row[4]),
@@ -340,9 +341,14 @@ def spell_skipped(count: object) -> str:
     return str(count)
 
 
+def window_start(now: datetime) -> datetime:
+    """The start of the rolling window that ends at `now`."""
+    return now - timedelta(days=WINDOW_DAYS)
+
+
 def window(now: datetime) -> tuple[str, str]:
     """The first and last minute of the rolling window that ends at `now`, inclusive."""
-    return minute(now - timedelta(days=WINDOW_DAYS)), minute(now)
+    return minute(window_start(now)), minute(now)
 
 
 def _where(accounts: Sequence[str], now: datetime, filters: Filters) -> tuple[str, list[object]]:

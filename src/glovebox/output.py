@@ -26,7 +26,7 @@ from glovebox.fields import (
     YesNoUnknown,
 )
 from glovebox.formats import MAX_ACCOUNTS, MAX_ITEMS, MAX_TOPICS
-from glovebox.sources import ReadStatus, SourceKind, SyncStatus
+from glovebox.sources import ReadOnlyEnforcement, ReadStatus, SourceKind, SyncStatus
 
 ErrorCode = Literal[
     "none",
@@ -77,12 +77,14 @@ class TopicsOutput(Output):
 
 class AccountEntry(BaseModel):
     """One account and how fresh its data is: a status, the last sync that read the
-    source (none if it never has), and how many items of it could not be understood."""
+    source (none if it never has), and how many items of it could not be understood. Also
+    who enforces that the source is only read: the gateway, or the access method itself."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     account_handle: Handle
     source_kind: SourceKind
+    read_only_enforcement: ReadOnlyEnforcement
     status: SyncStatus
     last_sync: Minute | None
     skipped_items: SkippedCount

@@ -356,6 +356,7 @@ async def test_the_accounts_tool_gives_only_handle_source_kind_and_sync_status(
         assert set(entry) == {
             "account_handle",
             "source_kind",
+            "read_only_enforcement",
             "status",
             "last_sync",
             "skipped_items",

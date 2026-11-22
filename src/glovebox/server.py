@@ -87,6 +87,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         settings.clock(),
         build_classifier(settings, config),
         config,
+        settings.imessage_max_silence,
     )
     app = create_server(tool).streamable_http_app(
         transport_security=transport_security(settings.allowed_hosts)

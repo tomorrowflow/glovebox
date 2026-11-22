@@ -36,7 +36,14 @@ from tests.test_queries import call
 READ_CALLS = {tool: OK_CALLS[tool] for tool in (LIST_TOOL, COUNT_TOOL, GROUP_TOOL)}
 FIRST_SYNC = "2026-01-10T12:00:00Z"
 LATER_SYNC = "2026-01-10T12:30:00Z"
-SYNC_FIELDS = {"account_handle", "source_kind", "status", "last_sync", "skipped_items"}
+SYNC_FIELDS = {
+    "account_handle",
+    "source_kind",
+    "read_only_enforcement",
+    "status",
+    "last_sync",
+    "skipped_items",
+}
 
 HOSTILE_BODY = json.dumps(
     {

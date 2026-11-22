@@ -3,10 +3,13 @@
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 DEFAULT_DB = "glovebox.db"
+MAX_SILENCE_VAR = "GLOVEBOX_IMESSAGE_MAX_SILENCE_HOURS"
+MAX_SILENCE_DIGITS = 6  # up to 999999 hours, far beyond any window
+DEFAULT_IMESSAGE_MAX_SILENCE = timedelta(hours=72)
 # One Host header value, spelled out: a DNS name or an IPv4 address, or a bracketed IPv6
 # address, then optionally a port. No wildcard is expressible.
 HOST_PATTERN = re.compile(
@@ -32,6 +35,10 @@ class Settings:
     fixed_now: datetime | None = None
     # Host header values served besides loopback, each listed in full. Empty by default.
     allowed_hosts: tuple[str, ...] = ()
+    # How long the Mac's Messages database may show no activity at all before the iMessage
+    # account is `stale`; None turns the check off. A database stays readable when Messages
+    # stops syncing, so silence is the only sign of it the gate can see.
+    imessage_max_silence: timedelta | None = DEFAULT_IMESSAGE_MAX_SILENCE
 
     def clock(self) -> Callable[[], datetime]:
         fixed = self.fixed_now
@@ -46,7 +53,19 @@ class Settings:
             stub_probe=_path(env.get("GLOVEBOX_STUB_CLASSIFIER_PROBE")),
             fixed_now=parse_fixed_now(env.get("GLOVEBOX_FIXED_NOW")),
             allowed_hosts=parse_allowed_hosts(env.get("GLOVEBOX_ALLOWED_HOSTS")),
+            imessage_max_silence=parse_max_silence(env.get(MAX_SILENCE_VAR)),
         )
+
+
+def parse_max_silence(value: str | None) -> timedelta | None:
+    """The silence limit in whole hours: unset is the default, 0 turns the check off."""
+    if value is None or not value.strip():
+        return DEFAULT_IMESSAGE_MAX_SILENCE
+    text = value.strip()
+    if not (text.isascii() and text.isdigit()) or len(text) > MAX_SILENCE_DIGITS:
+        raise ConfigError(f"{MAX_SILENCE_VAR} must be a whole number of hours, 0 to turn it off")
+    hours = int(text)
+    return timedelta(hours=hours) if hours else None
 
 
 def parse_allowed_hosts(value: str | None) -> tuple[str, ...]:
