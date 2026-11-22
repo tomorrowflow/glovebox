@@ -24,6 +24,8 @@ The gate reads the Mac's own Messages database, `~/Library/Messages/chat.db`, in
 - A consequence to accept: the gate's process, not a helper, holds Full Disk Access. It is the process that serves agents, so the interpreter's permission is only as safe as the gate's code. Granting a separate small reader would narrow this, at the price of a second process; it is not done here.
 - The test tier needs none of this: it reads the iMessage stand-in over HTTP, which needs no Messages, no GUI session and no permission.
 
+**What the gate cannot see.** An unreadable file is `blocked` and a database it cannot understand is `stale`, but the gate cannot tell that Messages is signed out, not running or not syncing: the file stays readable, so the account is `current` and merely has no newer messages. Treat a long-silent iMessage account as something to check on the Mac (the operator's acceptance run covers sign-in; nothing automatic does after it). Reading a database in WAL mode also touches the `-shm` index file next to it, which holds no message content; no message row is changed. If a macOS permission withholds only the `-wal` or `-shm` file, SQLite's open fails with no cause attached and the account reports `stale`, not `blocked`.
+
 ## What an item is
 
 - Only **received** messages are items. The operator's own messages, reactions (tapbacks), and system messages (group renames, joins) are left out silently.

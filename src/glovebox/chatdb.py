@@ -33,26 +33,29 @@ NANOSECOND_DATES = 100_000_000_000
 MAX_MESSAGES = 50_000
 BUSY_TIMEOUT_SECONDS = 5
 # Reactions (tapbacks) are messages of these types; they are not messages to triage.
-REACTION_TYPES = (2000, 3999)
+FIRST_REACTION_TYPE, LAST_REACTION_TYPE = 2000, 3999
 
-SECONDS_OF_DATE = "case when m.date > 100000000000 then m.date / 1000000000.0 else m.date end"
-FROM_WHERE = f"""
+SECONDS_OF_DATE = (
+    f"case when m.date > {NANOSECOND_DATES} then m.date / 1000000000.0 else m.date end"
+)
+# One statement, so that the total of the window and the rows come from the same snapshot:
+# `count(*) over ()` counts every row of the window, before the limit cuts it.
+QUERY = f"""
+select m.guid, h.id,
+  (select c.guid from chat c where c.ROWID =
+    (select min(j.chat_id) from chat_message_join j where j.message_id = m.ROWID)),
+  m.date, m.is_read, m.cache_has_attachments, m.text, m.attributedBody,
+  count(*) over ()
 from message m
 left join handle h on h.ROWID = m.handle_id
 where coalesce(m.is_from_me, 0) = 0
   and coalesce(m.item_type, 0) = 0
-  and coalesce(m.associated_message_type, 0) not between {REACTION_TYPES[0]} and {REACTION_TYPES[1]}
+  and coalesce(m.associated_message_type, 0)
+    not between {FIRST_REACTION_TYPE} and {LAST_REACTION_TYPE}
   and {SECONDS_OF_DATE} >= ?
+order by m.date desc
+limit ?
 """
-QUERY = (
-    "select m.guid, h.id,"
-    " (select c.guid from chat c where c.ROWID ="
-    "  (select min(j.chat_id) from chat_message_join j where j.message_id = m.ROWID)),"
-    " m.date, m.is_read, m.cache_has_attachments, m.text, m.attributedBody"
-    + FROM_WHERE
-    + " order by m.date desc limit ?"
-)
-COUNT_QUERY = "select count(*)" + FROM_WHERE
 
 _ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
@@ -122,9 +125,9 @@ def read_messages(path: Path, since: datetime) -> ChatMessages:
     skipped = 0
     with open_read_only(path) as database:
         rows = database.execute(QUERY, (seconds, MAX_MESSAGES)).fetchall()
-        total = int(database.execute(COUNT_QUERY, (seconds,)).fetchone()[0])
+    total = int(rows[0][-1]) if rows else 0
     for row in rows:
-        message = _message_of(row)
+        message = _message_of(row[:-1])
         if message is None:
             skipped += 1
         else:

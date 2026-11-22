@@ -33,7 +33,7 @@ from tests.client import ACCOUNTS_TOOL, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent
 from tests.conftest import GateStarter, RunningGate, operator
 from tests.hostile import CORPUS, assert_no_corpus, observe_gate
 from tests.test_failures import HOSTILE_BODY, account_of
-from tests.test_gate import storage_files
+from tests.test_gate import storage_files, write_fixture
 from tests.test_messenger import conversation, messenger, say
 from tests.test_queries import call
 from tests.test_standins import run_seed, serve
@@ -171,6 +171,32 @@ async def test_the_imessage_stand_in_is_served_as_messenger_items(
     for name, content in everything.items():
         text = content if isinstance(content, str) else content.decode("utf-8", "replace")
         assert not any(value in text for value in values), name
+
+
+@pytest.mark.anyio
+async def test_a_hostile_document_through_the_real_stand_in_leaks_no_corpus_string(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    state = tmp_path / "seed"
+    assert run_seed(state).returncode == 0
+    # The stand-in answers from the state directory on every request: replace its document.
+    write_fixture(state / "imessage.json", hostile_bridge_document())
+    with serve("imessage", state) as url:
+        with start_gate(accounts={"chat": url}, kinds={"chat": IMESSAGE}) as gate:
+            channels = await observe_gate(gate)
+            async with agent_client(gate) as client:
+                listing = await call(client, LIST_TOOL)
+            (state / "manifest.json").unlink()  # the stand-in is now unseeded and answers 503
+            async with agent_client(gate) as client:
+                outage = await call(client, LIST_TOOL)
+
+    assert len(served(listing)) == len(CORPUS)
+    assert outage["error"] == "source_unavailable" and outage["items"] == []
+    assert account_of(outage)["status"] == "stale"
+    channels["outage"] = json.dumps(outage)
+    channels["log"] = gate.log.read_text(errors="replace")
+    assert_no_corpus(channels)
+    assert_no_corpus(storage_files(gate.db))
 
 
 @pytest.mark.anyio
@@ -706,6 +732,34 @@ async def test_a_newly_received_message_appears_and_nothing_is_changed_in_the_da
 
 
 @pytest.mark.anyio
+async def test_a_gate_restart_over_the_local_database_keeps_the_last_sync(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    populate(messages_db)
+    with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
+        async with agent_client(gate) as client:
+            first = await call(client, LIST_TOOL)
+    messages_db.path.chmod(0o000)
+    try:
+        with start_gate(
+            accounts={"chat": messages_db.path},
+            kinds={"chat": IMESSAGE},
+            now="2026-01-10T12:30:00Z",
+        ) as gate:
+            async with agent_client(gate) as client:
+                down = await call(client, COUNT_TOOL)
+                messages_db.path.chmod(0o600)
+                after = await call(client, LIST_TOOL)
+    finally:
+        messages_db.path.chmod(0o600)
+
+    assert account_of(down)["status"] == "blocked"
+    assert account_of(down)["last_sync"] == FIRST_SYNC
+    assert served(after) == served(first)
+    assert account_of(after)["last_sync"] == "2026-01-10T12:30Z"
+
+
+@pytest.mark.anyio
 async def test_only_received_messages_are_items(
     start_gate: GateStarter, messages_db: MessagesDb
 ) -> None:
@@ -908,8 +962,8 @@ def test_a_malformed_typed_body_is_no_text_and_no_error(blob: bytes) -> None:
     assert chatdb.text_of_body(blob) == ""
 
 
-def window_start(days: int) -> datetime:
-    return datetime(2026, 1, 10, 12, tzinfo=UTC) - timedelta(days=days)
+def thirty_days_before_now() -> datetime:
+    return datetime(2026, 1, 10, 12, tzinfo=UTC) - timedelta(days=30)
 
 
 def test_more_messages_than_the_cap_are_reported_as_missing(
@@ -919,7 +973,7 @@ def test_more_messages_than_the_cap_are_reported_as_missing(
         messages_db.receive(f"g{number}", BOB, f"2026-01-05T18:0{number}:00Z")
     monkeypatch.setattr(chatdb, "MAX_MESSAGES", 3)
 
-    mailbox = chatdb.read_messages(messages_db.path, window_start(30))
+    mailbox = chatdb.read_messages(messages_db.path, thirty_days_before_now())
 
     assert [message.guid for message in mailbox.messages] == ["g4", "g3", "g2"]
     assert mailbox.skipped == 2
@@ -930,7 +984,6 @@ def test_names_filenames_and_types_are_not_selected_at_all() -> None:
 
     for column in ("display_name", "chat_identifier", "filename", "mime_type", "transfer_name"):
         assert column not in selected
-    assert "is_from_me, 0) = 0" in selected
 
 
 # --- the operator's acceptance script ------------------------------------------------------
