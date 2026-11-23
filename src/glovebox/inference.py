@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from glovebox.classification import ClassifierUnavailable, Topic
 from glovebox.classifier_config import Endpoint
 from glovebox.credentials import CredentialsError, read_credentials
-from glovebox.sources import NoRedirects
+from glovebox.sources import direct_opener
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +109,7 @@ class InferenceClassifier:
             request.add_header("Authorization", f"Bearer {key}")
         # No proxy and no redirect: neither may carry the text anywhere the operator did not
         # name, whatever the environment says.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects)
-        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+        with direct_opener().open(request, timeout=TIMEOUT_SECONDS) as response:
             data = response.read(MAX_REPLY_BYTES + 1)
         if len(data) > MAX_REPLY_BYTES:
             raise ValueError("reply too large")
