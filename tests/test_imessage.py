@@ -1301,10 +1301,10 @@ def test_rows_dated_in_the_future_do_not_use_up_the_cap(
 
 
 def test_names_filenames_and_types_are_not_selected_at_all() -> None:
-    selected = chatdb.QUERY.lower()
-
-    for column in ("display_name", "chat_identifier", "filename", "mime_type", "transfer_name"):
-        assert column not in selected
+    for query in (chatdb.QUERY, chatdb.QUERY_BEFORE_RECENTLY_DELETED):
+        selected = query.lower()
+        for column in ("display_name", "chat_identifier", "filename", "mime_type", "transfer_name"):
+            assert column not in selected
 
 
 # --- the operator's acceptance script ------------------------------------------------------
