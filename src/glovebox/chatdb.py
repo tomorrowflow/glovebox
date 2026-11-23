@@ -34,13 +34,16 @@ MAX_MESSAGES = 50_000
 BUSY_TIMEOUT_SECONDS = 5
 # Reactions (tapbacks) are messages of these types; they are not messages to triage.
 FIRST_REACTION_TYPE, LAST_REACTION_TYPE = 2000, 3999
-
 SECONDS_OF_DATE = (
     f"case when m.date > {NANOSECOND_DATES} then m.date / 1000000000.0 else m.date end"
 )
 # One statement, so that the total of the window and the rows come from the same snapshot:
-# `count(*) over ()` counts every row of the window, before the limit cuts it.
-QUERY = f"""
+# `count(*) over ()` counts every row of the window, before the limit cuts it. A message in no
+# conversation (no `chat_message_join` row) was deleted by the operator or left over from a
+# deleted conversation; Messages shows none of them, so they are neither served nor counted.
+# The same goes for a message in Recently Deleted (macOS 14 and later), which Messages may
+# leave in its conversation; `{recently_deleted}` is that filter, or nothing on older macOS.
+QUERY_TEMPLATE = f"""
 select m.guid, h.id,
   (select c.guid from chat c where c.ROWID =
     (select min(j.chat_id) from chat_message_join j where j.message_id = m.ROWID)),
@@ -52,11 +55,20 @@ where coalesce(m.is_from_me, 0) = 0
   and coalesce(m.item_type, 0) = 0
   and coalesce(m.associated_message_type, 0)
     not between {FIRST_REACTION_TYPE} and {LAST_REACTION_TYPE}
+  and exists (select 1 from chat_message_join j where j.message_id = m.ROWID)
+  {{recently_deleted}}
   and {SECONDS_OF_DATE} >= ?
   and {SECONDS_OF_DATE} < ?
 order by m.date desc
 limit ?
 """
+RECENTLY_DELETED_TABLE = "chat_recoverable_message_join"
+QUERY = QUERY_TEMPLATE.format(
+    recently_deleted=(
+        f"and not exists (select 1 from {RECENTLY_DELETED_TABLE} r where r.message_id = m.ROWID)"
+    )
+)
+QUERY_BEFORE_RECENTLY_DELETED = QUERY_TEMPLATE.format(recently_deleted="")
 
 # Both queries stop before the end of the minute of `now`, where the gate's window ends: a
 # row dated later (a device clock that was ahead) is neither served nor a sign of life, and
@@ -148,7 +160,12 @@ def read_messages(
     messages: list[ChatMessage] = []
     skipped = 0
     with open_read_only(path) as database:
-        rows = database.execute(QUERY, (seconds, until, MAX_MESSAGES)).fetchall()
+        has_recently_deleted = database.execute(
+            "select 1 from sqlite_master where type = 'table' and name = ?",
+            (RECENTLY_DELETED_TABLE,),
+        ).fetchone()
+        query = QUERY if has_recently_deleted else QUERY_BEFORE_RECENTLY_DELETED
+        rows = database.execute(query, (seconds, until, MAX_MESSAGES)).fetchall()
         newest = database.execute(NEWEST_QUERY, (until,)).fetchone()[0]
     if max_silence is not None:
         # A readable file proves only that it can be opened. Messages that stops syncing
