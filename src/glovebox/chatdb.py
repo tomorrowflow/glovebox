@@ -34,6 +34,9 @@ MAX_MESSAGES = 50_000
 BUSY_TIMEOUT_SECONDS = 5
 # Reactions (tapbacks) are messages of these types; they are not messages to triage.
 FIRST_REACTION_TYPE, LAST_REACTION_TYPE = 2000, 3999
+# A message that belongs to no conversation (it has no `chat_message_join` row) is one the
+# operator deleted, or one left over from a deleted conversation. Messages shows none of them,
+# so QUERY leaves them out: neither served nor counted as skipped.
 
 SECONDS_OF_DATE = (
     f"case when m.date > {NANOSECOND_DATES} then m.date / 1000000000.0 else m.date end"
@@ -52,6 +55,7 @@ where coalesce(m.is_from_me, 0) = 0
   and coalesce(m.item_type, 0) = 0
   and coalesce(m.associated_message_type, 0)
     not between {FIRST_REACTION_TYPE} and {LAST_REACTION_TYPE}
+  and exists (select 1 from chat_message_join j where j.message_id = m.ROWID)
   and {SECONDS_OF_DATE} >= ?
   and {SECONDS_OF_DATE} < ?
 order by m.date desc

@@ -600,6 +600,9 @@ create table message (
     item_type integer default 0, associated_message_type integer default 0, service text
 );
 create table chat_message_join (chat_id integer, message_id integer);
+create table chat_recoverable_message_join (
+    chat_id integer, message_id integer, delete_date integer, ck_sync_state integer
+);
 create table attachment (
     ROWID integer primary key autoincrement, filename text, mime_type text, transfer_name text
 );
@@ -660,6 +663,8 @@ class MessagesDb:
         item_type: int = 0,
         service: str = "iMessage",
         display_name: str | None = None,
+        in_conversation: bool = True,
+        recently_deleted: bool = False,
     ) -> None:
         with self._open() as database:
             handle = self._handles.get(sender)
@@ -695,7 +700,15 @@ class MessagesDb:
                 ),
             )
             message_id = cursor.lastrowid
-            database.execute("insert into chat_message_join values (?, ?)", (chat_id, message_id))
+            if in_conversation:
+                database.execute(
+                    "insert into chat_message_join values (?, ?)", (chat_id, message_id)
+                )
+            if recently_deleted:
+                database.execute(
+                    "insert into chat_recoverable_message_join values (?, ?, ?, 0)",
+                    (chat_id, message_id, apple_time(when)),
+                )
             if attachment is not None:
                 cursor = database.execute(
                     "insert into attachment (filename, mime_type, transfer_name) values (?, ?, ?)",
@@ -854,20 +867,37 @@ async def test_only_received_messages_are_items(
 
 
 @pytest.mark.anyio
-async def test_a_message_without_a_sender_or_conversation_is_skipped_and_counted(
+async def test_a_message_outside_any_conversation_is_not_an_item_and_not_a_skip(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    """Deleted conversations leave messages with no `chat_message_join` row, and Recently
+    Deleted ones sit in `chat_recoverable_message_join`; Messages shows none of them."""
+    messages_db.receive("orphan", BOB, "2026-01-05T18:00:00Z", in_conversation=False)
+    messages_db.receive(
+        "recoverable", BOB, "2026-01-05T18:01:00Z", in_conversation=False, recently_deleted=True
+    )
+    messages_db.receive("normal", BOB, "2026-01-05T18:02:00Z")
+    messages_db.receive("alive", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
+    with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, LIST_TOOL)
+
+    assert [item["received"] for item in served(result)] == ["2026-01-05T18:02Z"]
+    entry = account_of(result)
+    assert (entry["status"], entry["skipped_items"]) == ("current", "0")
+
+
+@pytest.mark.anyio
+async def test_a_message_without_a_sender_is_skipped_and_counted(
     start_gate: GateStarter, messages_db: MessagesDb
 ) -> None:
     messages_db.receive("ok", BOB, "2026-01-05T18:00:00Z")
     with sqlite3.connect(messages_db.path, isolation_level=None) as database:
         database.execute(
-            "insert into message (guid, text, handle_id, date) values ('no-chat', 'x', 1, ?)",
-            (apple_time("2026-01-05T18:01:00Z"),),
-        )
-        database.execute(
             "insert into message (guid, text, handle_id, date) values ('no-sender', 'x', 0, ?)",
             (apple_time("2026-01-05T18:02:00Z"),),
         )
-        database.execute("insert into chat_message_join values (1, 3)")
+        database.execute("insert into chat_message_join values (1, 2)")
     messages_db.receive("alive", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
     with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
         async with agent_client(gate) as client:
@@ -875,7 +905,7 @@ async def test_a_message_without_a_sender_or_conversation_is_skipped_and_counted
 
     assert len(served(result)) == 1
     entry = account_of(result)
-    assert (entry["status"], entry["skipped_items"]) == ("incomplete", "2")
+    assert (entry["status"], entry["skipped_items"]) == ("incomplete", "1")
 
 
 @pytest.mark.anyio
