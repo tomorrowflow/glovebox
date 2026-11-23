@@ -888,6 +888,42 @@ async def test_a_message_outside_any_conversation_is_not_an_item_and_not_a_skip(
 
 
 @pytest.mark.anyio
+async def test_a_recently_deleted_message_is_not_served_even_with_a_conversation(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    """Messages may keep the `chat_message_join` row of a message in Recently Deleted."""
+    messages_db.receive("deleted", BOB, "2026-01-05T18:01:00Z", recently_deleted=True)
+    messages_db.receive("normal", BOB, "2026-01-05T18:02:00Z")
+    messages_db.receive("alive", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
+    with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, LIST_TOOL)
+
+    assert [item["received"] for item in served(result)] == ["2026-01-05T18:02Z"]
+    entry = account_of(result)
+    assert (entry["status"], entry["skipped_items"]) == ("current", "0")
+
+
+@pytest.mark.anyio
+async def test_a_database_without_recently_deleted_is_read_as_before(
+    start_gate: GateStarter, messages_db: MessagesDb
+) -> None:
+    """macOS before 14 has no `chat_recoverable_message_join` table."""
+    messages_db.receive("orphan", BOB, "2026-01-05T18:00:00Z", in_conversation=False)
+    messages_db.receive("normal", BOB, "2026-01-05T18:02:00Z")
+    messages_db.receive("alive", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
+    with sqlite3.connect(messages_db.path, isolation_level=None) as database:
+        database.execute("drop table chat_recoverable_message_join")
+    with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, LIST_TOOL)
+
+    assert [item["received"] for item in served(result)] == ["2026-01-05T18:02Z"]
+    entry = account_of(result)
+    assert (entry["status"], entry["skipped_items"]) == ("current", "0")
+
+
+@pytest.mark.anyio
 async def test_a_message_without_a_sender_is_skipped_and_counted(
     start_gate: GateStarter, messages_db: MessagesDb
 ) -> None:
