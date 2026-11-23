@@ -897,7 +897,10 @@ async def test_a_message_without_a_sender_is_skipped_and_counted(
             "insert into message (guid, text, handle_id, date) values ('no-sender', 'x', 0, ?)",
             (apple_time("2026-01-05T18:02:00Z"),),
         )
-        database.execute("insert into chat_message_join values (1, 2)")
+        database.execute(
+            "insert into chat_message_join"
+            " select (select min(ROWID) from chat), ROWID from message where guid = 'no-sender'"
+        )
     messages_db.receive("alive", OPERATOR_ID, "2026-01-10T11:00:00Z", sent_by_me=True)
     with start_gate(accounts={"chat": messages_db.path}, kinds={"chat": IMESSAGE}) as gate:
         async with agent_client(gate) as client:

@@ -34,15 +34,13 @@ MAX_MESSAGES = 50_000
 BUSY_TIMEOUT_SECONDS = 5
 # Reactions (tapbacks) are messages of these types; they are not messages to triage.
 FIRST_REACTION_TYPE, LAST_REACTION_TYPE = 2000, 3999
-# A message that belongs to no conversation (it has no `chat_message_join` row) is one the
-# operator deleted, or one left over from a deleted conversation. Messages shows none of them,
-# so QUERY leaves them out: neither served nor counted as skipped.
-
 SECONDS_OF_DATE = (
     f"case when m.date > {NANOSECOND_DATES} then m.date / 1000000000.0 else m.date end"
 )
 # One statement, so that the total of the window and the rows come from the same snapshot:
-# `count(*) over ()` counts every row of the window, before the limit cuts it.
+# `count(*) over ()` counts every row of the window, before the limit cuts it. A message in no
+# conversation (no `chat_message_join` row) was deleted by the operator or left over from a
+# deleted conversation; Messages shows none of them, so they are neither served nor counted.
 QUERY = f"""
 select m.guid, h.id,
   (select c.guid from chat c where c.ROWID =
