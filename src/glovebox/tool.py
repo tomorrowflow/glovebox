@@ -186,7 +186,7 @@ class ReadTool:
         store: Store,
         access: Access,
         clock: Callable[[], datetime],
-        classifier: QuarantinedClassifier,
+        classifier_for: Callable[[str], QuarantinedClassifier],
         config: ClassifierConfig,
         imessage_max_silence: timedelta | None = None,
     ) -> None:
@@ -194,9 +194,9 @@ class ReadTool:
         self._store = store
         self._access = access
         self._clock = clock
-        self._classifier = classifier
+        self._classifier_for = classifier_for
         self._topic_ids = [topic.id for topic in config.topics]
-        self._config_digest = config.digest()
+        self._config = config
         self._sync = threading.Lock()
 
     async def definitions(self, principal: str | None) -> list[types.Tool]:
@@ -303,16 +303,17 @@ class ReadTool:
             for account, mailbox in fetched:
                 # Each item is classified on its own, outside any database transaction;
                 # one that is unchanged since its last classification is not classified
-                # again.
-                prepared = self._store.prepare_mailbox(
-                    account.handle, mailbox, now, self._config_digest
-                )
+                # again. The account's own inference settings are part of what a stored
+                # classification depends on, and decide which backend answers for it.
+                config_digest = self._config.digest(account.name)
+                classifier = self._classifier_for(account.name)
+                prepared = self._store.prepare_mailbox(account.handle, mailbox, now, config_digest)
                 classifications = [
-                    item.cached or self._classifier.classify(item.item.text, now)
+                    item.cached or classifier.classify(item.item.text, now)
                     for item in prepared.items
                 ]
                 self._store.commit_mailbox(
-                    account.kind, prepared, classifications, self._config_digest, now
+                    account.kind, prepared, classifications, config_digest, now
                 )
             for account, status in failed:
                 self._store.mark_unsynced(account.handle, account.kind, status)
