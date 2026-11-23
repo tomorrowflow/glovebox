@@ -147,7 +147,12 @@ def parse_classifier_config(document: object) -> ClassifierConfig:
 def _local(value: object) -> Endpoint:
     fields = _object(value, {"url", "model"}, "inference.local")
     url = _url(fields.get("url", DEFAULT_LOCAL_URL), "inference.local.url", external=False)
-    return Endpoint(url, _model(fields.get("model", DEFAULT_LOCAL_MODEL), "inference.local.model"))
+    model = _model(fields.get("model", DEFAULT_LOCAL_MODEL), "inference.local.model")
+    if model.lower().endswith("cloud"):
+        # A loopback address is not proof of local execution: Ollama forwards a cloud-tagged
+        # model (`name:cloud`, `name-cloud`) to its own servers.
+        raise ConfigError("inference.local.model names a cloud model, which does not run here")
+    return Endpoint(url, model)
 
 
 def _external(value: object) -> tuple[Endpoint | None, frozenset[str]]:

@@ -105,12 +105,6 @@ class NoRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def direct_opener() -> urllib.request.OpenerDirector:
-    """An opener that goes straight to the address it is given: no proxy from the
-    environment, and no redirect."""
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects)
-
-
 class FixtureSource(ABC):
     """A document, read from a file or from a stand-in or bridge over HTTP, and the way an
     unreadable one is told apart from one that refuses access. A subclass names the kind
@@ -157,7 +151,8 @@ class FixtureSource(ABC):
                 if not bearer_may_travel(self._location):
                     raise SourceBlocked
                 request.add_header("Authorization", f"Bearer {self._bearer.reveal()}")
-            with direct_opener().open(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects)
+            with opener.open(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
                 data = response.read(MAX_DOCUMENT_BYTES + 1)
         if len(data) > MAX_DOCUMENT_BYTES:
             raise SourceError

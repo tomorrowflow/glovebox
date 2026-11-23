@@ -601,6 +601,100 @@ def test_a_server_that_answers_too_slowly_is_unavailable_and_logs_no_text(
     assert_no_corpus({"log": caplog.text})
 
 
+@contextmanager
+def dripping(seconds: float) -> Iterator[str]:
+    """A server that starts a reply and then sends one byte every 50 ms for `seconds`: each
+    wait is short, the whole reply is long."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Content-Length", "1000000")
+            self.end_headers()
+            end = time.monotonic() + seconds
+            try:
+                while time.monotonic() < end:
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                pass  # the client gave up
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_reply_that_keeps_trickling_in_is_cut_off_at_one_deadline_for_the_whole_call(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(inference, "TIMEOUT_SECONDS", 0.5)
+    with dripping(seconds=10) as url:
+        backend = InferenceClassifier(endpoint(url), "local")
+        started = time.monotonic()
+        with pytest.raises(ClassifierUnavailable):
+            backend.classify(hostile_text(), TOPIC_LIST)
+        elapsed = time.monotonic() - started
+
+    # Every single wait is under the timeout; only a deadline on the whole call ends it.
+    assert elapsed < 2.0
+    assert_no_corpus({"log": caplog.text})
+
+
+def test_a_keep_alive_chunked_reply_is_read_whole() -> None:
+    """The way a real runtime answers: HTTP/1.1, a chunked body, the connection kept open."""
+    reply = completion(BILLING)
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for start in range(0, len(reply), 20):
+                piece = reply[start : start + 20]
+                self.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        assert InferenceClassifier(endpoint(url), "local").classify("t", TOPIC_LIST) == BILLING
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_server_that_accepts_and_then_says_nothing_is_cut_off_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(inference, "TIMEOUT_SECONDS", 0.5)
+    with scripted(body=completion(BILLING), delay=5.0) as server:
+        backend = InferenceClassifier(endpoint(server.url), "local")
+        started = time.monotonic()
+        with pytest.raises(ClassifierUnavailable):
+            backend.classify("t", TOPIC_LIST)
+
+    assert time.monotonic() - started < 2.0
+
+
 def test_the_request_is_not_logged_even_when_it_succeeds(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -682,6 +776,9 @@ def test_an_account_digest_covers_its_own_inference_settings_and_no_others() -> 
         {"local": {"url": "ftp://127.0.0.1"}},
         {"local": {"url": "http://127.0.0.1:99999"}},
         {"local": {"model": "bad model"}},
+        {"local": {"model": "gpt-oss:120b-cloud"}},  # a cloud tag runs off the host
+        {"local": {"model": "kimi-k2.7-code:cloud"}},
+        {"local": {"model": "some-model:Cloud"}},
         {"local": {"model": CORPUS["injection"]}},
         {"local": {"unknown": 1}},
         {"external": {"url": "http://inference.example.test", "model": "m"}},  # https only

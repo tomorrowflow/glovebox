@@ -12,22 +12,25 @@ a failure is logged as its kind only. A failure of any kind is `ClassifierUnavai
 there is no retry elsewhere and no other backend to turn to (ADR 0002).
 """
 
+import http
+import http.client
 import json
 import logging
-import urllib.error
-import urllib.request
-from collections.abc import Sequence
+import socket
+import time
+from collections.abc import Mapping, Sequence
+from urllib.parse import urlsplit
 
 from glovebox.classification import ClassifierUnavailable, Topic
 from glovebox.classifier_config import Endpoint
 from glovebox.credentials import CredentialsError, read_credentials
-from glovebox.sources import direct_opener
 
 logger = logging.getLogger(__name__)
 
 CHAT_PATH = "/v1/chat/completions"
 TIMEOUT_SECONDS = 60
 MAX_REPLY_BYTES = 256 * 1024
+READ_PIECE_BYTES = 16 * 1024
 MAX_REPLY_TOKENS = 256
 
 INSTRUCTIONS = """\
@@ -50,6 +53,14 @@ Topics:
 {topics}"""
 
 
+class BadStatus(Exception):
+    """The server answered with a status other than 200. The status is safe to log."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(status)
+        self.status = status
+
+
 def instructions(topics: Sequence[Topic]) -> str:
     listing = "\n".join(
         f"- {topic.id}: {topic.name}" + (f". {topic.description}" if topic.description else "")
@@ -64,7 +75,7 @@ class InferenceClassifier:
     def __init__(self, endpoint: Endpoint, label: str) -> None:
         if endpoint.url is None:
             raise ValueError("an inference endpoint needs an address")
-        self._url = endpoint.url + CHAT_PATH
+        self._url = urlsplit(endpoint.url + CHAT_PATH)
         self._model = endpoint.model
         self._key_file = endpoint.key_file
         self._label = label
@@ -77,10 +88,9 @@ class InferenceClassifier:
         except Exception as error:
             # An HTTP status is safe to name; any other exception's message may hold a
             # fragment of the request or the reply, so only its type is logged.
-            if isinstance(error, urllib.error.HTTPError):
-                error.close()
-            code = getattr(error, "code", None)
-            detail = f"HTTP {code}" if isinstance(code, int) else type(error).__name__
+            detail = (
+                f"HTTP {error.status}" if isinstance(error, BadStatus) else type(error).__name__
+            )
             logger.warning("%s inference failed: %s", self._label, detail)
             raise ClassifierUnavailable from None
 
@@ -98,22 +108,66 @@ class InferenceClassifier:
                 "response_format": {"type": "json_object"},
             }
         ).encode()
-        request = urllib.request.Request(self._url, data=body, method="POST")
-        request.add_header("Content-Type", "application/json")
+        headers = {"Content-Type": "application/json"}
         if self._key_file is not None:
             try:
                 key = read_credentials(self._key_file).reveal()
             except CredentialsError:
                 logger.warning("%s inference failed: the key file cannot be used", self._label)
                 raise ClassifierUnavailable from None
-            request.add_header("Authorization", f"Bearer {key}")
-        # No proxy and no redirect: neither may carry the text anywhere the operator did not
-        # name, whatever the environment says.
-        with direct_opener().open(request, timeout=TIMEOUT_SECONDS) as response:
-            data = response.read(MAX_REPLY_BYTES + 1)
-        if len(data) > MAX_REPLY_BYTES:
-            raise ValueError("reply too large")
+            headers["Authorization"] = f"Bearer {key}"
+        data = self._post(body, headers)
         content = json.loads(data)["choices"][0]["message"]["content"]
         if not isinstance(content, str):
             raise TypeError("reply has no text")
         return content
+
+    def _post(self, body: bytes, headers: Mapping[str, str]) -> bytes:
+        """The reply body of one POST, which must be done within TIMEOUT_SECONDS in all.
+
+        A socket timeout bounds one wait, and a server that sends a byte now and then never
+        trips it. So the call has one deadline: before every read the socket's timeout is set
+        to what is left of it, and the body is read in pieces (`read1` returns as soon as
+        some bytes are there). This is `http.client` on purpose: it uses no proxy from the
+        environment and follows no redirect, so neither can carry the text anywhere the
+        operator did not name.
+        """
+        deadline = time.monotonic() + TIMEOUT_SECONDS
+        connect = (
+            http.client.HTTPSConnection
+            if self._url.scheme == "https"
+            else http.client.HTTPConnection
+        )
+        connection = connect(self._url.hostname or "", self._url.port, timeout=TIMEOUT_SECONDS)
+
+        def arm(sock: socket.socket) -> None:
+            """Allow the next wait only what is left of the deadline."""
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("the call took too long")
+            sock.settimeout(remaining)
+
+        try:
+            connection.request("POST", self._url.path, body, dict(headers))
+            # The connection lets go of its socket once a reply says it will close; the
+            # reply keeps reading from it.
+            sock = connection.sock
+            if sock is None:
+                raise ConnectionError("not connected")
+            arm(sock)
+            response = connection.getresponse()
+            if response.status != http.HTTPStatus.OK:
+                raise BadStatus(response.status)
+            pieces: list[bytes] = []
+            size = 0
+            # The response closes itself, and the connection with it, once it has been read.
+            while not response.isclosed():
+                arm(sock)
+                piece = response.read1(READ_PIECE_BYTES)
+                pieces.append(piece)
+                size += len(piece)
+                if size > MAX_REPLY_BYTES:
+                    raise ValueError("reply too large")
+            return b"".join(pieces)
+        finally:
+            connection.close()
