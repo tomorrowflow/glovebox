@@ -12,11 +12,12 @@ a failure is logged as its kind only. A failure of any kind is `ClassifierUnavai
 there is no retry elsewhere and no other backend to turn to (ADR 0002).
 """
 
-import http
+import contextlib
 import http.client
 import json
 import logging
 import socket
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from urllib.parse import urlsplit
@@ -123,16 +124,54 @@ class InferenceClassifier:
         return content
 
     def _post(self, body: bytes, headers: Mapping[str, str]) -> bytes:
-        """The reply body of one POST, which must be done within TIMEOUT_SECONDS in all.
+        """The reply body of one POST, which is back within TIMEOUT_SECONDS in all.
 
         A socket timeout bounds one wait, and a server that sends a byte now and then never
-        trips it. So the call has one deadline: before every read the socket's timeout is set
-        to what is left of it, and the body is read in pieces (`read1` returns as soon as
-        some bytes are there). This is `http.client` on purpose: it uses no proxy from the
-        environment and follows no redirect, so neither can carry the text anywhere the
-        operator did not name.
+        trips it, in the body or in the middle of a header or a chunk-size line. So the
+        exchange runs in a worker, and the caller waits for it for the one deadline and then
+        takes the socket away (the worker has no way to carry on) and gives up. The caller
+        is thus back in time wherever the worker is, connecting included. A worker that is
+        still in a connect or a name lookup ends with that call's own timeout.
         """
         deadline = time.monotonic() + TIMEOUT_SECONDS
+        outcome: list[bytes | BaseException] = []
+        sockets: list[socket.socket] = []
+        finished = threading.Event()
+
+        def work() -> None:
+            try:
+                outcome.append(self._exchange(body, headers, deadline, sockets))
+            except BaseException as error:
+                outcome.append(error)
+            finally:
+                finished.set()
+
+        threading.Thread(target=work, daemon=True).start()
+        if not finished.wait(TIMEOUT_SECONDS):
+            for sock in list(sockets):
+                # Wake a read that is waiting, and make the next one fail at once.
+                sock.settimeout(0.001)
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+            raise TimeoutError("the call took too long")
+        reply = outcome[0]
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    def _exchange(
+        self,
+        body: bytes,
+        headers: Mapping[str, str],
+        deadline: float,
+        sockets: list[socket.socket],
+    ) -> bytes:
+        """One POST and its whole reply. Before every read the socket's timeout is set to what
+        is left of the deadline, and the body is read in pieces (`read1` returns as soon as
+        some bytes are there). `sockets` is told of the connection's socket. This is
+        `http.client` on purpose: it uses no proxy from the environment and follows no
+        redirect, so neither can carry the text anywhere the operator did not name.
+        """
         connect = (
             http.client.HTTPSConnection
             if self._url.scheme == "https"
@@ -154,6 +193,7 @@ class InferenceClassifier:
             sock = connection.sock
             if sock is None:
                 raise ConnectionError("not connected")
+            sockets.append(sock)
             arm(sock)
             response = connection.getresponse()
             if response.status != http.HTTPStatus.OK:

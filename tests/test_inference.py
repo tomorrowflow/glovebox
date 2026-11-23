@@ -8,6 +8,7 @@ Error shapes a stand-in cannot make (an outage mid-reply, a redirect, a slow ans
 from a small scripted server. Nothing here says anything about a real model's quality.
 """
 
+import http.client
 import io
 import json
 import logging
@@ -602,29 +603,9 @@ def test_a_server_that_answers_too_slowly_is_unavailable_and_logs_no_text(
 
 
 @contextmanager
-def dripping(seconds: float) -> Iterator[str]:
-    """A server that starts a reply and then sends one byte every 50 ms for `seconds`: each
-    wait is short, the whole reply is long."""
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.send_response(200)
-            self.send_header("Content-Length", "1000000")
-            self.end_headers()
-            end = time.monotonic() + seconds
-            try:
-                while time.monotonic() < end:
-                    self.wfile.write(b" ")
-                    self.wfile.flush()
-                    time.sleep(0.05)
-            except OSError:
-                pass  # the client gave up
-
-        def log_message(self, format: str, *args: object) -> None:
-            pass
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+def serving(handler: type[BaseHTTPRequestHandler]) -> Iterator[str]:
+    """The address of a server whose requests `handler` answers."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -634,19 +615,54 @@ def dripping(seconds: float) -> Iterator[str]:
         server.server_close()
 
 
+# What a trickling server starts its reply with: the body of a long reply, the middle of a
+# header line, and the size line of a chunk. Each is followed by one byte every 50 ms.
+TRICKLES = {
+    "body": b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n",
+    "header": b"HTTP/1.1 200 OK\r\nX-Pad: ",
+    "chunk size": b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+}
+
+
+@contextmanager
+def trickling(start: bytes) -> Iterator[str]:
+    """A server that sends `start` and then one byte every 50 ms for a long while: each wait
+    is short, the whole reply is long."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                self.wfile.write(start)
+                for _ in range(200):
+                    self.wfile.write(b"a")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                pass  # the client gave up
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with serving(Handler) as url:
+        yield url
+
+
+@pytest.mark.parametrize("phase", TRICKLES)
 def test_a_reply_that_keeps_trickling_in_is_cut_off_at_one_deadline_for_the_whole_call(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    phase: str, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     caplog.set_level(logging.DEBUG)
     monkeypatch.setattr(inference, "TIMEOUT_SECONDS", 0.5)
-    with dripping(seconds=10) as url:
+    with trickling(TRICKLES[phase]) as url:
         backend = InferenceClassifier(endpoint(url), "local")
         started = time.monotonic()
         with pytest.raises(ClassifierUnavailable):
             backend.classify(hostile_text(), TOPIC_LIST)
         elapsed = time.monotonic() - started
 
-    # Every single wait is under the timeout; only a deadline on the whole call ends it.
+    # Every single wait is under the timeout; only a deadline on the whole call ends it,
+    # whichever part of the reply is the one trickling.
     assert elapsed < 2.0
     assert_no_corpus({"log": caplog.text})
 
@@ -671,15 +687,24 @@ def test_a_keep_alive_chunked_reply_is_read_whole() -> None:
         def log_message(self, format: str, *args: object) -> None:
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        url = f"http://127.0.0.1:{server.server_port}"
+    with serving(Handler) as url:
         assert InferenceClassifier(endpoint(url), "local").classify("t", TOPIC_LIST) == BILLING
-    finally:
-        server.shutdown()
-        server.server_close()
+
+
+def test_a_connect_that_takes_too_long_is_cut_off_at_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name lookup or a connect has no deadline of its own that the call could share."""
+    monkeypatch.setattr(inference, "TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", lambda self: time.sleep(3))
+    with standin("inference-local", stub_state(tmp_path)) as server:
+        backend = InferenceClassifier(endpoint(server.url), "local")
+        started = time.monotonic()
+        with pytest.raises(ClassifierUnavailable):
+            backend.classify("t", TOPIC_LIST)
+
+    assert time.monotonic() - started < 2.0
+    assert server.seen == []
 
 
 def test_a_server_that_accepts_and_then_says_nothing_is_cut_off_at_the_deadline(
