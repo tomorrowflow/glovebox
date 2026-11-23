@@ -10,7 +10,7 @@ Glovebox has a hosted runtime (the gate service and its SQLite database), so it 
 |------|------|---------------|------|-----------|----------------|
 | Throwaway | `factory` | the ticket's factory node | the factory node's host | the ticket's own stack in rootless Docker | the ticket |
 | Test | `glovebox-test`, a hidden macOS user | `glovebox-test` | the Mac mini (`florians-mac-mini`, macOS, arm64) | only `origin/main`, natively: a Python virtualenv run by launchd | `scripts/env.py ensure-test`, from the LaunchDaemon `glovebox.test.ensure-test` every 5 minutes |
-| Production | `frogger` | none | the Mac mini | a `main` commit that is green on test, natively | the operator only; never tickets or agents |
+| Production | `frogger` | none | the Mac mini | a `main` commit that is green on test, natively | the operator administers it; tickets and agents never do, and an agent reaches only the gate, with a scoped operator-issued token |
 
 **Hosts and runtime (superseding the decisions of 2026-11-15 and 2026-11-20).** The operator decided on 2026-11-21 that test and production both run on the Mac mini. The earlier choice was the 790 for test and `zotac1070` for production, both Linux with rootless Docker. The reason for the move is the iMessage source: it reads Messages' `chat.db` and needs a Mac signed in to Messages. Production must live where Messages does, and test is on the same machine and the same runtime so that what test proves is what production runs. Both run **natively**, with no Docker: the Mac mini has no container runtime, and the iMessage bridge has to read `chat.db` natively anyway. Throwaway is unchanged: rootless Docker on the Linux factory nodes. Docker on macOS is not used for any tier.
 
