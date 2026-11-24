@@ -694,16 +694,25 @@ def test_a_keep_alive_chunked_reply_is_read_whole() -> None:
 def test_a_connect_that_takes_too_long_is_cut_off_at_the_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A name lookup or a connect has no deadline of its own that the call could share."""
+    """A name lookup or a connect has no deadline of its own that the call could share. One
+    that completes after the call has given up must not then send the item's text."""
+    connect = http.client.HTTPConnection.connect
+
+    def slow_connect(self: http.client.HTTPConnection) -> None:
+        time.sleep(1.5)  # the name lookup or handshake that outlives the deadline
+        connect(self)
+
     monkeypatch.setattr(inference, "TIMEOUT_SECONDS", 0.5)
-    monkeypatch.setattr(http.client.HTTPConnection, "connect", lambda self: time.sleep(3))
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", slow_connect)
     with standin("inference-local", stub_state(tmp_path)) as server:
         backend = InferenceClassifier(endpoint(server.url), "local")
         started = time.monotonic()
         with pytest.raises(ClassifierUnavailable):
             backend.classify("t", TOPIC_LIST)
+        elapsed = time.monotonic() - started
+        time.sleep(2.0)  # long enough for the connect to complete, and a request to follow it
 
-    assert time.monotonic() - started < 2.0
+    assert elapsed < 1.2
     assert server.seen == []
 
 
