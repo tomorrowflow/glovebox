@@ -766,9 +766,8 @@ def test_an_explicit_null_backend_still_means_no_classifier() -> None:
     assert config.route("home") is None
     assert config.digest("home") != parse_classifier_config({"topics": TOPICS}).digest("home")
     # A profile beside it is as harmless as it always was.
-    assert (
-        parse_classifier_config({"inference": {"backend": None, "profile": "p1"}}).profile == "p1"
-    )
+    with_profile = parse_classifier_config({"inference": {"backend": None, "profile": "p1"}})
+    assert (with_profile.backend, with_profile.profile) == (None, "p1")
 
 
 @pytest.mark.anyio
@@ -787,12 +786,14 @@ async def test_a_null_backend_leaves_every_item_unavailable_and_asks_no_model(
     assert local.seen == [] and ext.seen == []
 
 
-def test_a_backend_that_is_left_out_is_local_inference() -> None:
-    for inference_section in ({}, {"profile": "p1"}, {"local": {"model": "other:8b"}}):
-        config = parse_classifier_config({"topics": TOPICS, "inference": inference_section})
+@pytest.mark.parametrize("settings", [{"profile": "p1"}, {"local": {"model": "other:8b"}}])
+def test_an_inference_section_that_leaves_the_backend_out_means_local_inference(
+    settings: dict[str, object],
+) -> None:
+    config = parse_classifier_config({"topics": TOPICS, "inference": settings})
 
-        assert config.backend == "local"
-        assert config.route("home") == "local"
+    assert config.backend == "local"
+    assert config.route("home") == "local"
 
 
 def test_only_the_listed_accounts_route_to_external_inference() -> None:
