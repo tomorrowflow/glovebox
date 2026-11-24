@@ -5,206 +5,50 @@
   "dir": "LR",
   "motion": "trace",
   "nodes": [
-    {
-      "id": "envpy",
-      "label": "scripts/env.py",
-      "sub": "up, reset, down, serve, ensure-test",
-      "focal": true,
-      "row": 1,
-      "col": 1
-    },
-    {
-      "id": "seed",
-      "label": "seed",
-      "sub": "Compose job: writes the fixture cast",
-      "row": 0,
-      "col": 2,
-      "group": "docker"
-    },
-    {
-      "id": "state",
-      "label": "Fixture state",
-      "sub": "Compose volume state; native .run/state/seed",
-      "kind": "store",
-      "row": 0,
-      "col": 3,
-      "group": "docker"
-    },
-    {
-      "id": "standins",
-      "label": "standins",
-      "sub": "Compose service, ports 9101-9109",
-      "row": 1,
-      "col": 3,
-      "group": "docker"
-    },
-    {
-      "id": "gate",
-      "label": "gate",
-      "sub": "Compose service, glovebox serve, port 8765",
-      "row": 1,
-      "col": 4,
-      "group": "docker"
-    },
-    {
-      "id": "testd",
-      "label": "Test daemons",
-      "sub": "glovebox.test.gate and glovebox.test.standins",
-      "row": 2,
-      "col": 0,
-      "group": "mactest"
-    },
-    {
-      "id": "ensure",
-      "label": "Refresh timer",
-      "sub": "glovebox.test.ensure-test, every 300 s",
-      "row": 3,
-      "col": 0,
-      "group": "mactest"
-    },
-    {
-      "id": "prod",
-      "label": "Production gate",
-      "sub": "LaunchAgent glovebox.prod.gate, operator only",
-      "kind": "security",
-      "row": 4,
-      "col": 0,
-      "group": "macprod"
-    },
-    {
-      "id": "prodin",
-      "label": "Secrets and Messages",
-      "sub": "gate.env (mode 600) and chat.db",
-      "kind": "external",
-      "row": 4,
-      "col": 1,
-      "group": "macprod"
-    }
+    {"id": "envpy", "label": "scripts/env.py", "sub": "up, reset, down, serve, ensure-test", "focal": true, "row": 1, "col": 1},
+    {"id": "seed", "label": "seed", "sub": "Compose job: writes the fixture cast", "row": 0, "col": 2, "group": "docker"},
+    {"id": "state", "label": "Compose volume state", "sub": "shared by seed and standins", "kind": "store", "row": 0, "col": 3, "group": "docker"},
+    {"id": "standins", "label": "standins", "sub": "Compose service, ports 9101-9109", "row": 1, "col": 3, "group": "docker"},
+    {"id": "gate", "label": "gate", "sub": "Compose service, glovebox serve, port 8765", "row": 1, "col": 4, "group": "docker"},
+    {"id": "testd", "label": "Test daemons", "sub": "glovebox.test.gate, .standins, .ensure-test", "row": 2, "col": 0, "group": "mactest"},
+    {"id": "nstate", "label": "Native fixture state", "sub": ".run/state/seed in the checkout", "kind": "store", "row": 2, "col": 1, "group": "mactest"},
+    {"id": "prod", "label": "Production gate", "sub": "LaunchAgent glovebox.prod.gate, operator only", "kind": "security", "row": 4, "col": 0, "group": "macprod"},
+    {"id": "prodin", "label": "Secrets and Messages", "sub": "gate.env (mode 600) and chat.db", "kind": "external", "row": 4, "col": 1, "group": "macprod"}
   ],
   "edges": [
-    {"from":"envpy","to":"seed","label":"up, reset: compose run seed","kind":"primary"},
-    {"from":"seed","to":"state","label":"writes cast","kind":"primary"},
-    {"from":"standins","to":"state","label":"reads cast"},
-    {"from":"gate","to":"standins","label":"depends_on: service_healthy","kind":"primary"},
-    {"from":"envpy","to":"gate","label":"up: compose up --wait"},
-    {"from":"envpy","to":"state","label":"native up, reset: seed.py"},
-    {"from":"testd","to":"envpy","label":"env.py serve gate, standins","kind":"async"},
-    {"from":"ensure","to":"envpy","label":"run env.py ensure-test","kind":"async"},
-    {"from":"prod","to":"prodin","label":"sources, reads"}
+    {"from": "envpy", "to": "seed", "label": "up, reset: compose run seed", "kind": "primary"},
+    {"from": "seed", "to": "state", "label": "writes cast", "kind": "primary"},
+    {"from": "standins", "to": "state", "label": "reads cast"},
+    {"from": "gate", "to": "standins", "label": "depends_on: service_healthy", "kind": "primary"},
+    {"from": "envpy", "to": "gate", "label": "up: compose up --wait"},
+    {"from": "envpy", "to": "nstate", "label": "native up, reset: seed.py"},
+    {"from": "testd", "to": "nstate", "label": "native standins read cast"},
+    {"from": "testd", "to": "envpy", "label": "env.py serve, ensure-test", "kind": "async"},
+    {"from": "prod", "to": "prodin", "label": "sources, reads"}
   ],
   "groups": [
-    {"id":"docker","label":"Docker: throwaway, Linux test"},
-    {"id":"mactest","label":"Mac mini: test (fixtures)","style":"dashed"},
-    {"id":"macprod","label":"Mac mini: production (operator)","style":"dashed"}
+    {"id": "docker", "label": "Docker: throwaway, Linux test"},
+    {"id": "mactest", "label": "Mac mini: test (fixtures)", "style": "dashed"},
+    {"id": "macprod", "label": "Mac mini: production (operator)", "style": "dashed"}
   ],
   "evidence": [
-    {
-      "id": "envpy",
-      "file": "scripts/env.py",
-      "line": 908,
-      "note": "main() dispatches the subcommands that build_parser registers (line 873 on). TIERS at line 56 names throwaway and test only: no command here touches production."
-    },
-    {
-      "id": "seed",
-      "file": "compose.yaml",
-      "line": 82,
-      "note": "Runs seed.py as root in the container to own the state volume; profile tools keeps it out of a plain up, so env.py runs it by name."
-    },
-    {
-      "id": "state",
-      "file": "compose.yaml",
-      "line": 93,
-      "note": "Named volume state, mounted at /state by the stand-ins and the seed job. Natively the same files live in the checkout's .run/state/seed (env.py:439)."
-    },
-    {
-      "id": "standins",
-      "file": "compose.yaml",
-      "line": 68,
-      "note": "Healthcheck at line 71 passes only once every listener has the seeded cast; listeners answer 503 before (deploy/standins/standins.py:44)."
-    },
-    {
-      "id": "gate",
-      "file": "compose.yaml",
-      "line": 20,
-      "note": "Built from deploy/Dockerfile.gate. compose.test.yaml adds restart: unless-stopped and a fixed loopback port on the Linux test tier; the throwaway tier gets a free loopback port."
-    },
-    {
-      "id": "testd",
-      "file": "deploy/launchd/glovebox.test.gate.plist",
-      "line": 13,
-      "note": "Two system LaunchDaemons as glovebox-test, with no GUI login. glovebox.test.standins.plist has the same shape (line 11). The processes are native: env.py's service_plan (line 292) starts glovebox serve --bootstrap-fixture and standins.py from the checkout's virtualenv, against the seeded fixture."
-    },
-    {
-      "id": "ensure",
-      "file": "deploy/launchd/glovebox.test.ensure-test.plist",
-      "line": 39,
-      "note": "StartInterval 300; it runs at load and then every 5 minutes."
-    },
-    {
-      "id": "prod",
-      "file": "deploy/launchd/glovebox.prod.gate.plist",
-      "line": 19,
-      "note": "A LaunchAgent, not a daemon, because production reads Messages in frogger's GUI session. The operator installs it by hand (docs/environments.md, production runbook); env.py and the test daemons never load it. It starts the plain glovebox command, with no --bootstrap-fixture."
-    },
-    {
-      "id": "prodin",
-      "file": "deploy/launchd/glovebox.prod.gate.plist",
-      "line": 25,
-      "note": "The shell sources the secrets file named by @SECRETS@ and execs the gate; no tool in the repository reads or writes it. The gate opens ~/Library/Messages/chat.db read-only (src/glovebox/chatdb.py:119)."
-    },
-    {
-      "id": "envpy>seed",
-      "file": "scripts/env.py",
-      "line": 206,
-      "note": "seed(): docker compose run --rm --no-deps seed, called from command_up (line 570)."
-    },
-    {
-      "id": "seed>state",
-      "file": "compose.yaml",
-      "line": 87,
-      "note": "The seed service mounts fixtures read-only and the state volume read-write."
-    },
-    {
-      "id": "standins>state",
-      "file": "compose.yaml",
-      "line": 17,
-      "note": "The shared x-standin anchor mounts the state volume; standins.py reads it from STANDINS_STATE (line 83)."
-    },
-    {
-      "id": "gate>standins",
-      "file": "compose.yaml",
-      "line": 64,
-      "note": "The gate starts only once standins is healthy, and reaches it by name through the GLOVEBOX_STANDIN_* URLs (line 41 on)."
-    },
-    {
-      "id": "envpy>gate",
-      "file": "scripts/env.py",
-      "line": 572,
-      "note": "Starts the stack and waits for the healthchecks; depends_on brings standins up first."
-    },
-    {
-      "id": "envpy>state",
-      "file": "scripts/env.py",
-      "line": 439,
-      "note": "native_seed() runs deploy/standins/seed.py into .run/state/seed, for up and reset on the native test backend."
-    },
-    {
-      "id": "testd>envpy",
-      "file": "deploy/launchd/glovebox.test.gate.plist",
-      "line": 21,
-      "note": "ProgramArguments: env.py serve gate --tier test. serve (env.py:493) keeps one process alive while the desired-state file asks for it."
-    },
-    {
-      "id": "ensure>envpy",
-      "file": "deploy/launchd/glovebox.test.ensure-test.plist",
-      "line": 20,
-      "note": "ProgramArguments: env.py ensure-test --tier test, which brings the test stack to origin/main (env.py:759)."
-    },
-    {
-      "id": "prod>prodin",
-      "file": "deploy/launchd/glovebox.prod.gate.plist",
-      "line": 25,
-      "note": "set -a; . \"$1\"; set +a; exec \"$2\", with the secrets file and .venv/bin/glovebox as arguments."
-    }
+    {"id": "envpy", "file": "scripts/env.py", "line": 908, "note": "main() dispatches the subcommands that build_parser registers (line 873 on). TIERS at line 56 names throwaway and test only: no command here touches production."},
+    {"id": "seed", "file": "compose.yaml", "line": 82, "note": "Runs seed.py as root in the container to own the state volume; profile tools keeps it out of a plain up, so env.py runs it by name."},
+    {"id": "state", "file": "compose.yaml", "line": 93, "note": "Named volume state, mounted at /state by the stand-ins and the seed job. Only the Docker stack uses it; the native test tier keeps its own copy in nstate."},
+    {"id": "standins", "file": "compose.yaml", "line": 68, "note": "Healthcheck at line 71 passes only once every listener has the seeded cast; listeners answer 503 before (deploy/standins/standins.py:44)."},
+    {"id": "gate", "file": "compose.yaml", "line": 20, "note": "Built from deploy/Dockerfile.gate. compose.test.yaml adds restart: unless-stopped and a fixed loopback port on the Linux test tier; the throwaway tier gets a free loopback port."},
+    {"id": "testd", "file": "deploy/launchd/glovebox.test.gate.plist", "line": 13, "note": "Three system LaunchDaemons as glovebox-test, with no GUI login. glovebox.test.standins.plist has the same shape (line 11); glovebox.test.ensure-test.plist runs env.py ensure-test at load and then every 300 s (line 39). The gate and stand-ins are native: env.py's service_plan (line 292) starts glovebox serve --bootstrap-fixture and standins.py from the checkout's virtualenv, against the seeded fixture."},
+    {"id": "nstate", "file": "scripts/env.py", "line": 46, "note": "SEED_STATE, under the checkout's gitignored .run directory and owned by glovebox-test. It is separate from the Compose volume state: the native test tier runs no Docker."},
+    {"id": "prod", "file": "deploy/launchd/glovebox.prod.gate.plist", "line": 19, "note": "A LaunchAgent, not a daemon, because production reads Messages in frogger's GUI session. The operator installs it by hand (docs/environments.md, production runbook); env.py and the test daemons never load it. It starts the plain glovebox command, with no --bootstrap-fixture."},
+    {"id": "prodin", "file": "deploy/launchd/glovebox.prod.gate.plist", "line": 25, "note": "The shell sources the secrets file named by @SECRETS@ and execs the gate; no tool in the repository reads or writes it. The gate opens ~/Library/Messages/chat.db read-only (src/glovebox/chatdb.py:119)."},
+    {"id": "envpy>seed", "file": "scripts/env.py", "line": 206, "note": "seed(): docker compose run --rm --no-deps seed, called from command_up (line 570)."},
+    {"id": "seed>state", "file": "compose.yaml", "line": 87, "note": "The seed service mounts fixtures read-only and the state volume read-write."},
+    {"id": "standins>state", "file": "compose.yaml", "line": 17, "note": "The shared x-standin anchor mounts the state volume; standins.py reads it from STANDINS_STATE (line 83)."},
+    {"id": "gate>standins", "file": "compose.yaml", "line": 64, "note": "The gate starts only once standins is healthy, and reaches it by name through the GLOVEBOX_STANDIN_* URLs (line 41 on)."},
+    {"id": "envpy>gate", "file": "scripts/env.py", "line": 572, "note": "Starts the Docker stack and waits for the healthchecks; depends_on brings standins up first."},
+    {"id": "envpy>nstate", "file": "scripts/env.py", "line": 439, "note": "native_seed() runs deploy/standins/seed.py into SEED_STATE, for up and reset on the native test backend. No Compose volume is involved."},
+    {"id": "testd>nstate", "file": "scripts/env.py", "line": 318, "note": "service_plan sets STANDINS_STATE to SEED_STATE for the native stand-ins, which read it on every request."},
+    {"id": "testd>envpy", "file": "deploy/launchd/glovebox.test.gate.plist", "line": 21, "note": "ProgramArguments: env.py serve gate --tier test; serve (env.py:493) keeps one process alive while the desired-state file asks for it. glovebox.test.ensure-test.plist:20 runs env.py ensure-test, which brings the test stack to origin/main (env.py:759)."},
+    {"id": "prod>prodin", "file": "deploy/launchd/glovebox.prod.gate.plist", "line": 25, "note": "set -a; . \"$1\"; set +a; exec \"$2\", with the secrets file and .venv/bin/glovebox as arguments."}
   ]
 }
