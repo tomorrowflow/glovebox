@@ -16,7 +16,7 @@ Glovebox has a hosted runtime (the gate service and its SQLite database), so it 
 
 **Test identity.** `glovebox-test` is a hidden macOS user with no login session and no sudo, with the OpenClaw node `glovebox-test`. Its jobs are therefore system LaunchDaemons with `UserName` set to that user, installed once by root from the plists in `deploy/launchd/`. After that, `scripts/env.py` manages the stack without root: the daemons run `env.py serve`, and `up`, `down` and `ensure-test` only restart those user-owned processes, never launchd.
 
-**Production identity.** `frogger` on the Mac mini, operator only. Messages is signed in under `frogger`, so the production gate runs as a LaunchAgent in that user's login session, with its secrets in files only `frogger` can read. Nothing is installed there until the operator runs `04-install-prod`.
+**Production identity.** `frogger` on the Mac mini, administered by the operator only. Messages is signed in under `frogger`, so the production gate runs as a LaunchAgent in that user's login session, with its secrets in files only `frogger` can read. Nothing is installed there until the operator runs `04-install-prod`.
 
 **Shared tooling.** Throwaway and test share one executable Python `scripts/env.py` with `up`, `check`, `reset`, `down`, `ensure-test` and `install-timer`, plus `serve` for the native daemons. Throwaway runs in Docker from one compose file. The test tier on macOS runs the gate and the stand-ins from a virtualenv built from the checkout. `up` creates the gitignored env file with the test token when it is missing. `install-timer` installs the user timer `glovebox-test-env.timer` where the platform is Linux, and writes the launchd plists on macOS.
 
