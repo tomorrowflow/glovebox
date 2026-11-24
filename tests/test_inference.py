@@ -757,6 +757,44 @@ def test_a_configuration_without_inference_settings_means_local_inference() -> N
     assert config.route("work") == "local"
 
 
+def test_an_explicit_null_backend_still_means_no_classifier() -> None:
+    """A configuration written before inference backends existed turned the classifier off
+    with `"backend": null`; it must keep loading, and keep it off for every account."""
+    config = parse_classifier_config({"topics": TOPICS, "inference": {"backend": None}})
+
+    assert config.backend is None
+    assert config.route("home") is None
+    assert config.digest("home") != parse_classifier_config({"topics": TOPICS}).digest("home")
+    # A profile beside it is as harmless as it always was.
+    assert (
+        parse_classifier_config({"inference": {"backend": None, "profile": "p1"}}).profile == "p1"
+    )
+
+
+@pytest.mark.anyio
+async def test_a_null_backend_leaves_every_item_unavailable_and_asks_no_model(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    state = seed_state(tmp_path / "state", BILLING, TRAVEL)
+    with standin("inference-local", state) as local, standin("inference-external", state) as ext:
+        operator = Operator(tmp_path)
+        operator.inference = {"backend": None}
+        operator.local, operator.external = local.url, ext.url
+
+        results, _ = await classify_each(start_gate, tmp_path, operator)
+
+    assert results == {"home": UNAVAILABLE, "work": UNAVAILABLE}
+    assert local.seen == [] and ext.seen == []
+
+
+def test_a_backend_that_is_left_out_is_local_inference() -> None:
+    for inference_section in ({}, {"profile": "p1"}, {"local": {"model": "other:8b"}}):
+        config = parse_classifier_config({"topics": TOPICS, "inference": inference_section})
+
+        assert config.backend == "local"
+        assert config.route("home") == "local"
+
+
 def test_only_the_listed_accounts_route_to_external_inference() -> None:
     config = parse_classifier_config(
         {
@@ -829,7 +867,8 @@ def test_an_account_digest_covers_its_own_inference_settings_and_no_others() -> 
         {"backend": "stub", "external": {"model": "m"}},
         {"backend": "stub", "local": {}},
         {"backend": "cloud"},
-        {"backend": None},
+        {"backend": None, "external": {"model": "m"}},  # disabled: nothing to route
+        {"backend": None, "local": {}},
     ],
 )
 def test_an_unusable_inference_setting_is_refused_without_echoing_it(inference: object) -> None:

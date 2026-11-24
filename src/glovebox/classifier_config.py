@@ -131,8 +131,9 @@ def parse_classifier_config(document: object) -> ClassifierConfig:
     inference = _object(
         section.get("inference", {}), {"backend", "profile", "local", "external"}, "inference"
     )
+    # Left out means local inference; an explicit null has always meant no classifier.
     backend = inference.get("backend", "local")
-    if backend not in BACKENDS:
+    if backend is not None and backend not in BACKENDS:
         raise ConfigError("inference.backend is not a known backend")
     profile = inference.get("profile", "")
     if not isinstance(profile, str) or (profile and not PROFILE_PATTERN.fullmatch(profile)):
