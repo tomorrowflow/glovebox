@@ -2,7 +2,7 @@
 
 The quarantined classifier (ADR 0002) asks a model for four things about one item: topic, reply-needed, action-requested and deadline. The gate does it with one chat completion on an OpenAI-compatible server. By default that server is a local runtime on the gateway host. The operator can name accounts whose items go to an external provider instead. Nothing else ever sends an item's text off the host. Ticket 12; code in `src/glovebox/inference.py` and `src/glovebox/classifier_config.py`.
 
-**Not yet run on the real model.** The tests use the canned inference stand-ins, which answer the same completion every time and say nothing about classification quality or resource use. The operator's acceptance run is below, and until it passes the production classifier stays unconfigured.
+**Not yet run on the real model.** The tests use the canned inference stand-ins, which answer the same completion every time and say nothing about classification quality or resource use. The operator's acceptance run is below, and until it passes the classifier's fields are not to be relied on.
 
 ## The local runtime, and why
 

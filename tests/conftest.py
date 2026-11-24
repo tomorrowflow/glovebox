@@ -52,14 +52,16 @@ def _accepts_connections(port: int) -> bool:
         return False
 
 
+# With no classifier configuration the gate asks local inference. Tests point it at an address
+# where nothing listens (the same one throughout the run, so that a restarted gate keeps its
+# cached classifications), so that none depends on a runtime on the machine it runs on.
+NO_RUNTIME = f"http://127.0.0.1:{free_port()}"
+
+
 def clean_environment(db: Path, **extra: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GLOVEBOX_")}
-    # With no classifier configuration the gate asks local inference. Point it at an address
-    # where nothing listens, so that no test depends on a runtime on the machine it runs on.
     env.update(
-        GLOVEBOX_DB=str(db),
-        GLOVEBOX_FIXED_NOW=NOW,
-        GLOVEBOX_STANDIN_INFERENCE_LOCAL=f"http://127.0.0.1:{free_port()}",
+        GLOVEBOX_DB=str(db), GLOVEBOX_FIXED_NOW=NOW, GLOVEBOX_STANDIN_INFERENCE_LOCAL=NO_RUNTIME
     )
     env.update(extra)
     return env

@@ -25,6 +25,7 @@ from glovebox.config import ConfigError
 from glovebox.formats import MAX_TOPICS, MINUTE_FORMAT, RESERVED_TOPICS, TOPIC_ID_PATTERN, minute
 
 BACKENDS = ("local", "stub")
+DEFAULT_BACKEND = "local"
 PROFILE_PATTERN = re.compile(r"[a-z0-9._-]{1,32}")
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}")
 TOPIC_ID = re.compile(TOPIC_ID_PATTERN)
@@ -61,7 +62,7 @@ class ClassifierConfig:
     # The default, with no configuration at all, is local inference. None, which only an
     # explicit `"backend": null` gives, turns the classifier off: every item's classification
     # is unavailable and no model is asked.
-    backend: str | None = "local"
+    backend: str | None = DEFAULT_BACKEND
     profile: str = ""
     local: Endpoint = Endpoint(DEFAULT_LOCAL_URL, DEFAULT_LOCAL_MODEL)
     external: Endpoint | None = None
@@ -134,7 +135,7 @@ def parse_classifier_config(document: object) -> ClassifierConfig:
         section.get("inference", {}), {"backend", "profile", "local", "external"}, "inference"
     )
     # Left out means local inference; an explicit null has always meant no classifier.
-    backend = inference.get("backend", "local")
+    backend = inference.get("backend", DEFAULT_BACKEND)
     if backend is not None and backend not in BACKENDS:
         raise ConfigError("inference.backend is not a known backend")
     profile = inference.get("profile", "")

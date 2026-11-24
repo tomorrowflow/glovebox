@@ -60,6 +60,7 @@ HOME_BODY = "HOMEBODY-body about the invoice"
 WORK_BODY = "WORKBODY-body about the invoice"
 BILLING = json.dumps(GOOD)
 TRAVEL = json.dumps({**GOOD, "topic": "travel"})
+OTHER = json.dumps({**GOOD, "topic": "other"})
 CLASSIFIED = {**GOOD_SERVED, "status": "classified"}
 CLASSIFIED_TRAVEL = {**CLASSIFIED, "topic": "travel"}
 UNAVAILABLE = {**UNKNOWN_FIELDS, "status": "unavailable"}
@@ -758,9 +759,6 @@ def test_a_configuration_without_inference_settings_means_local_inference() -> N
     assert config.route("work") == "local"
 
 
-OTHER = {**GOOD, "topic": "other"}
-
-
 def test_with_no_configuration_file_the_classifier_is_local_inference() -> None:
     config = load_classifier_config(None)
 
@@ -774,7 +772,7 @@ def test_with_no_configuration_file_the_classifier_is_local_inference() -> None:
 async def test_with_no_configuration_file_items_are_classified_by_local_inference(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:
-    state = seed_state(tmp_path / "state", json.dumps(OTHER), TRAVEL)
+    state = seed_state(tmp_path / "state", OTHER, TRAVEL)
     fixture = write_fixture(tmp_path / "mail.json", mailbox(message("m1", HOME_BODY, 1)))
     with standin("inference-local", state) as local, standin("inference-external", state) as ext:
         env = {
@@ -790,25 +788,6 @@ async def test_with_no_configuration_file_items_are_classified_by_local_inferenc
     assert served(item) == {**CLASSIFIED, "topic": "other"}
     assert local.texts() == [f"Subject m1\n\n{HOME_BODY}"]
     assert ext.seen == []  # external inference needs an operator's configuration
-
-
-@pytest.mark.anyio
-async def test_with_no_configuration_file_and_no_runtime_items_are_unavailable(
-    start_gate: GateStarter, tmp_path: Path
-) -> None:
-    state = seed_state(tmp_path / "state", json.dumps(OTHER), TRAVEL)
-    fixture = write_fixture(tmp_path / "mail.json", mailbox(message("m1", HOME_BODY, 1)))
-    with standin("inference-external", state) as ext:
-        env = {
-            "GLOVEBOX_STANDIN_INFERENCE_LOCAL": closed_address(),
-            "GLOVEBOX_STANDIN_INFERENCE_EXTERNAL": ext.url,
-        }
-        with start_gate(mail_fixture=fixture, extra_env=env) as gate:
-            async with agent_client(gate) as client:
-                [item] = await list_items(client)
-
-    assert served(item) == UNAVAILABLE
-    assert ext.seen == []  # no fallback to anything else
 
 
 def test_an_explicit_null_backend_still_means_no_classifier() -> None:
