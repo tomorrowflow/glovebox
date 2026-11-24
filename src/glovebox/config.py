@@ -25,7 +25,7 @@ class ConfigError(Exception):
 class Settings:
     db_path: Path
     # The operator's topic list, deadline range and inference settings; read by the service
-    # at startup. Unset means no classifier is configured.
+    # at startup. Unset means the defaults: an empty topic list and local inference.
     classifier_config: Path | None = None
     # Test-only controls of the stub classifier: its script, and a record of its calls.
     stub_script: Path | None = None

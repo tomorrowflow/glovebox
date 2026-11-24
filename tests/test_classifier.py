@@ -417,7 +417,7 @@ async def test_an_item_the_classifier_cannot_answer_is_unknown_and_unavailable_b
 
 
 @pytest.mark.anyio
-async def test_without_a_configured_classifier_every_item_is_unavailable(
+async def test_with_no_local_runtime_to_answer_every_item_is_unavailable_and_counted_so(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:
     fixture = write_fixture(

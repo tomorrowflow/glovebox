@@ -58,8 +58,10 @@ class Endpoint:
 class ClassifierConfig:
     topics: tuple[Topic, ...] = ()
     deadline_range: DeadlineRange = DeadlineRange()
-    # None means no classifier is configured: every item's classification is unavailable.
-    backend: str | None = None
+    # The default, with no configuration at all, is local inference. None, which only an
+    # explicit `"backend": null` gives, turns the classifier off: every item's classification
+    # is unavailable and no model is asked.
+    backend: str | None = "local"
     profile: str = ""
     local: Endpoint = Endpoint(DEFAULT_LOCAL_URL, DEFAULT_LOCAL_MODEL)
     external: Endpoint | None = None

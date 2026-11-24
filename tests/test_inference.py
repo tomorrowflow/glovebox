@@ -32,11 +32,12 @@ from glovebox.classifier_config import (
     DEFAULT_LOCAL_MODEL,
     DEFAULT_LOCAL_URL,
     Endpoint,
+    load_classifier_config,
     parse_classifier_config,
 )
 from glovebox.config import ConfigError
 from glovebox.inference import InferenceClassifier
-from tests.client import ACCOUNTS_TOOL, agent_client
+from tests.client import ACCOUNTS_TOOL, TOPICS_TOOL, agent_client
 from tests.conftest import GateStarter, clean_environment, free_port
 from tests.hostile import CORPUS, assert_no_corpus, hostile_mail_fixture, observe_gate
 from tests.test_classifier import (
@@ -755,6 +756,59 @@ def test_a_configuration_without_inference_settings_means_local_inference() -> N
     assert config.local == Endpoint(DEFAULT_LOCAL_URL, DEFAULT_LOCAL_MODEL)
     assert config.external is None
     assert config.route("work") == "local"
+
+
+OTHER = {**GOOD, "topic": "other"}
+
+
+def test_with_no_configuration_file_the_classifier_is_local_inference() -> None:
+    config = load_classifier_config(None)
+
+    assert config.backend == "local"
+    assert config.route("home") == "local"
+    assert config.topics == ()
+    assert config.local == Endpoint(DEFAULT_LOCAL_URL, DEFAULT_LOCAL_MODEL)
+
+
+@pytest.mark.anyio
+async def test_with_no_configuration_file_items_are_classified_by_local_inference(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    state = seed_state(tmp_path / "state", json.dumps(OTHER), TRAVEL)
+    fixture = write_fixture(tmp_path / "mail.json", mailbox(message("m1", HOME_BODY, 1)))
+    with standin("inference-local", state) as local, standin("inference-external", state) as ext:
+        env = {
+            "GLOVEBOX_STANDIN_INFERENCE_LOCAL": local.url,
+            "GLOVEBOX_STANDIN_INFERENCE_EXTERNAL": ext.url,
+        }
+        with start_gate(mail_fixture=fixture, extra_env=env) as gate:
+            async with agent_client(gate) as client:
+                [item] = await list_items(client)
+                topics = await call(client, TOPICS_TOOL)
+
+    assert topics["topics"] == []
+    assert served(item) == {**CLASSIFIED, "topic": "other"}
+    assert local.texts() == [f"Subject m1\n\n{HOME_BODY}"]
+    assert ext.seen == []  # external inference needs an operator's configuration
+
+
+@pytest.mark.anyio
+async def test_with_no_configuration_file_and_no_runtime_items_are_unavailable(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    state = seed_state(tmp_path / "state", json.dumps(OTHER), TRAVEL)
+    fixture = write_fixture(tmp_path / "mail.json", mailbox(message("m1", HOME_BODY, 1)))
+    with standin("inference-external", state) as ext:
+        env = {
+            "GLOVEBOX_STANDIN_INFERENCE_LOCAL": closed_address(),
+            "GLOVEBOX_STANDIN_INFERENCE_EXTERNAL": ext.url,
+        }
+        with start_gate(mail_fixture=fixture, extra_env=env) as gate:
+            async with agent_client(gate) as client:
+                [item] = await list_items(client)
+
+    assert served(item) == UNAVAILABLE
+    assert ext.seen == []  # no fallback to anything else
 
 
 def test_an_explicit_null_backend_still_means_no_classifier() -> None:

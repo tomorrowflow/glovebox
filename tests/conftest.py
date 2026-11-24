@@ -54,7 +54,13 @@ def _accepts_connections(port: int) -> bool:
 
 def clean_environment(db: Path, **extra: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GLOVEBOX_")}
-    env.update(GLOVEBOX_DB=str(db), GLOVEBOX_FIXED_NOW=NOW)
+    # With no classifier configuration the gate asks local inference. Point it at an address
+    # where nothing listens, so that no test depends on a runtime on the machine it runs on.
+    env.update(
+        GLOVEBOX_DB=str(db),
+        GLOVEBOX_FIXED_NOW=NOW,
+        GLOVEBOX_STANDIN_INFERENCE_LOCAL=f"http://127.0.0.1:{free_port()}",
+    )
     env.update(extra)
     return env
 
