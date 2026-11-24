@@ -691,16 +691,21 @@ def test_a_keep_alive_chunked_reply_is_read_whole() -> None:
         assert InferenceClassifier(endpoint(url), "local").classify("t", TOPIC_LIST) == BILLING
 
 
-def test_a_connect_that_takes_too_long_is_cut_off_at_the_deadline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("slow_part", ["before the connection is made", "after it is made"])
+def test_a_connect_that_takes_too_long_is_cut_off_at_the_deadline_and_nothing_is_sent(
+    slow_part: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A name lookup or a connect has no deadline of its own that the call could share. One
-    that completes after the call has given up must not then send the item's text."""
-    connect = http.client.HTTPConnection.connect
+    that completes after the call has given up must not then send the item's text, whether
+    the time went before the socket exists (a lookup) or after (a handshake)."""
+    real_connect = http.client.HTTPConnection.connect
 
     def slow_connect(self: http.client.HTTPConnection) -> None:
-        time.sleep(1.5)  # the name lookup or handshake that outlives the deadline
-        connect(self)
+        if slow_part.startswith("before"):
+            time.sleep(1.5)
+        real_connect(self)
+        if slow_part.startswith("after"):
+            time.sleep(1.5)
 
     monkeypatch.setattr(inference, "TIMEOUT_SECONDS", 0.5)
     monkeypatch.setattr(http.client.HTTPConnection, "connect", slow_connect)

@@ -132,17 +132,16 @@ class InferenceClassifier:
         takes the socket away (the worker has no way to carry on) and gives up. The caller
         is thus back in time wherever the worker is, connecting included. A worker that is
         still in a connect or a name lookup ends with that call's own timeout, and if the
-        connect completes after the caller gave up, it sends nothing.
+        connect completes after the caller gave up, it starts no send.
         """
         deadline = time.monotonic() + TIMEOUT_SECONDS
         outcome: list[bytes | BaseException] = []
         sockets: list[socket.socket] = []
         finished = threading.Event()
-        cancelled = threading.Event()
 
         def work() -> None:
             try:
-                outcome.append(self._exchange(body, headers, deadline, sockets, cancelled))
+                outcome.append(self._exchange(body, headers, deadline, sockets))
             except BaseException as error:
                 outcome.append(error)
             finally:
@@ -150,7 +149,6 @@ class InferenceClassifier:
 
         threading.Thread(target=work, daemon=True).start()
         if not finished.wait(TIMEOUT_SECONDS):
-            cancelled.set()
             for sock in list(sockets):
                 # Wake a read that is waiting, and make the next one fail at once.
                 sock.settimeout(0.001)
@@ -168,14 +166,12 @@ class InferenceClassifier:
         headers: Mapping[str, str],
         deadline: float,
         sockets: list[socket.socket],
-        cancelled: threading.Event,
     ) -> bytes:
         """One POST and its whole reply. Before every send and read the socket's timeout is set
         to what is left of the deadline, and the body is read in pieces (`read1` returns as
-        soon as some bytes are there). `sockets` is told of the connection's socket, and
-        nothing is sent once `cancelled` is set. This is `http.client` on purpose: it uses
-        no proxy from the environment and follows no redirect, so neither can carry the text
-        anywhere the operator did not name.
+        soon as some bytes are there). `sockets` is told of the connection's socket. This is
+        `http.client` on purpose: it uses no proxy from the environment and follows no
+        redirect, so neither can carry the text anywhere the operator did not name.
         """
         connect = (
             http.client.HTTPSConnection
@@ -201,10 +197,9 @@ class InferenceClassifier:
             if sock is None:
                 raise ConnectionError("not connected")
             sockets.append(sock)
-            # The caller sets `cancelled` before it takes the registered sockets away, so
-            # either it sees this socket or this check sees that it has gone.
-            if cancelled.is_set():
-                raise TimeoutError("the call was given up on")
+            # Past the deadline, which is when the caller gives up, `arm` raises: a connect
+            # that completes late sends nothing. A caller that gives up in the moment between
+            # this and the send takes the socket away, and the send fails.
             arm(sock)
             connection.request("POST", self._url.path, body, dict(headers))
             arm(sock)
