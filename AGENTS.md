@@ -25,7 +25,7 @@ Dependencies are pinned exactly in `pyproject.toml`; `constraints.txt` pins the 
 
 ## Environments
 
-Bring up a throwaway stack for your ticket with `python3 scripts/env.py up`, then `check`, `reset` and `down`. It runs the gate in rootless Docker with a stand-in for every outside service and a seeded fictional fixture cast. Never put real data in a fixture. Test and production run natively on the Mac mini, with no Docker. Tiers, the test environment and the production runbook are in `docs/environments.md`. Tickets and agents never touch production.
+Bring up a throwaway stack for your ticket with `python3 scripts/env.py up`, then `check`, `reset` and `down`. It runs the gate in rootless Docker with a stand-in for every outside service and a seeded fictional fixture cast. Never put real data in a fixture. Test and production run natively on the Mac mini, with no Docker. Tiers, the test environment and the production runbook are in `docs/environments.md`. Tickets and agents never administer production; an agent reaches only its gate, with a scoped operator-issued token.
 
 ## Read first
 
