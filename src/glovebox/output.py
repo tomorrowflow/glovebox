@@ -14,6 +14,7 @@ from typing import Literal
 from mcp import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from glovebox.calendars import BusyStatus
 from glovebox.fields import (
     ClassificationStatus,
     Count,
@@ -119,6 +120,40 @@ class Group(BaseModel):
 
 class GroupOutput(ReadOutput):
     groups: list[Group] = Field(default=[], max_length=MAX_ITEMS)
+    next_cursor: Cursor | None = None
+
+
+class CalendarEvent(BaseModel):
+    """One calendar event: handles, times and a busy status. No semantic fields, and nothing
+    the organizer wrote."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    event_handle: Handle
+    account_handle: Handle
+    start: Minute
+    end: Minute
+    all_day: bool
+    busy_status: BusyStatus
+
+
+class EventsOutput(ReadOutput):
+    events: list[CalendarEvent] = Field(default=[], max_length=MAX_ITEMS)
+    next_cursor: Cursor | None = None
+
+
+class Window(BaseModel):
+    """A stretch of time, all of it busy or all of it free."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    start: Minute
+    end: Minute
+    state: Literal["busy", "free"]
+
+
+class AvailabilityOutput(ReadOutput):
+    windows: list[Window] = Field(default=[], max_length=MAX_ITEMS)
     next_cursor: Cursor | None = None
 
 

@@ -69,6 +69,15 @@ create table if not exists items (
     config_digest text not null
 );
 create index if not exists items_by_received on items (received desc, item_handle);
+create table if not exists events (
+    event_handle text primary key,
+    account_handle text not null,
+    start_time text not null,
+    end_time text not null,
+    all_day integer not null,
+    busy_status text not null
+);
+create index if not exists events_by_start on events (start_time, event_handle);
 create table if not exists sync_state (
     account_handle text primary key,
     source_kind text not null,

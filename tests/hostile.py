@@ -17,9 +17,12 @@ from mcp.shared.exceptions import MCPError
 from tests.client import (
     ACCOUNTS_TOOL,
     ALL_TOOLS,
+    AVAILABILITY_TOOL,
     COUNT_TOOL,
+    EVENTS_TOOL,
     GROUP_TOOL,
     LIST_TOOL,
+    OVERLAPS_TOOL,
     TOPICS_TOOL,
     agent_client,
 )
@@ -184,6 +187,63 @@ def hostile_messenger_fixture() -> dict[str, object]:
     return {"account": f"+{CORPUS['marker']}", "conversations": conversations}
 
 
+def hostile_calendar_fixture() -> dict[str, object]:
+    """A fixture calendar with a corpus string in every attacker-writable field.
+
+    One event per corpus string carries it in the title, description, location, UID, URLs,
+    attachment names, attendee and organizer names and addresses, comments, categories and
+    the extension status tokens (status, transparency, participation, and a status of the
+    event's own kind), with a valid time; some recur, in a time zone, with a corpus string in
+    the rule's own extra key. Four more events per corpus string carry it where the gate cannot
+    read it: as the raw start time, the time zone, an exception date and the recurrence rule.
+    """
+    events: list[dict[str, object]] = []
+    for index, text in enumerate(CORPUS.values()):
+        start = datetime(2026, 1, 12 + index, 8, 15, 42, tzinfo=timezone(timedelta(hours=1)))
+        event: dict[str, object] = {
+            "id": f"uid-{text}@evil.test",
+            "title": text,
+            "summary": text,
+            "description": text,
+            "location": text,
+            "url": f"https://evil.test/{text}",
+            "attachments": [{"filename": text, "url": f"https://evil.test/{text}", "mime": text}],
+            "organizer": {"name": text, "email": f"{text}@evil.test"},
+            "attendees": [
+                {"name": text, "email": f"{text}@evil.test", "participation": text},
+                {"name": f"{text} two", "email": f"two-{text}@evil.test"},
+            ],
+            "comments": [text],
+            "categories": [text],
+            "start": start.isoformat(),
+            "end": (start + timedelta(minutes=45)).isoformat(),
+        }
+        if index % 4 == 1:
+            event["status"] = f"X-{text}"
+        elif index % 4 == 2:
+            event["transparency"] = text
+        elif index % 4 == 3:
+            event["participation"] = text
+        if index % 3 == 0:
+            event["timezone"] = "Europe/Berlin"
+            event["recurrence"] = {"freq": "weekly", "count": 3, "x-note": text}
+            event["exceptions"] = ["2026-01-19"]
+        events.append(event)
+    for text in CORPUS.values():
+        unreadable: dict[str, object] = {
+            "title": text,
+            "start": "2026-01-12T10:00:00Z",
+            "end": "2026-01-12T11:00:00Z",
+        }
+        events.append({**unreadable, "id": f"bad-start-{text}", "start": text})
+        events.append({**unreadable, "id": f"bad-zone-{text}", "timezone": text})
+        events.append({**unreadable, "id": f"bad-exception-{text}", "exceptions": [text]})
+        events.append(
+            {**unreadable, "id": f"bad-rule-{text}", "recurrence": {"freq": text, "x": text}}
+        )
+    return {"account": f"{CORPUS['marker']} <account@evil.test>", "events": events}
+
+
 FILTER_PARAMETERS = (
     "read_status",
     "received_from",
@@ -207,6 +267,20 @@ OK_CALLS: dict[str, dict[str, object]] = {
     COUNT_TOOL: {},
     GROUP_TOOL: {"group_by": "sender_handle"},
     TOPICS_TOOL: {},
+    AVAILABILITY_TOOL: {},
+    EVENTS_TOOL: {},
+    OVERLAPS_TOOL: {},
+}
+
+RANGE_PARAMETERS = ("range_from", "range_to", "account_handle", "limit", "cursor")
+# The parameters of each tool, where it takes any: the accounts and topics tools take none.
+PARAMETERS: dict[str, tuple[str, ...]] = {
+    LIST_TOOL: (*FILTER_PARAMETERS, "limit", "cursor", "sort"),
+    COUNT_TOOL: FILTER_PARAMETERS,
+    GROUP_TOOL: (*FILTER_PARAMETERS, "limit", "cursor", "group_by"),
+    AVAILABILITY_TOOL: RANGE_PARAMETERS,
+    EVENTS_TOOL: (*RANGE_PARAMETERS, "busy_status", "all_day", "sort"),
+    OVERLAPS_TOOL: RANGE_PARAMETERS,
 }
 
 
@@ -217,23 +291,25 @@ def hostile_calls() -> dict[str, tuple[str, dict[str, object]]]:
     """
     calls: dict[str, tuple[str, dict[str, object]]] = {}
     for tool, base in OK_CALLS.items():
-        # The accounts and topics tools take no parameter at all.
-        parameters = [] if tool in (ACCOUNTS_TOOL, TOPICS_TOOL) else [*FILTER_PARAMETERS]
-        if tool in (LIST_TOOL, GROUP_TOOL):
-            parameters += ["limit", "cursor"]
-        parameters += {LIST_TOOL: ["sort"], GROUP_TOOL: ["group_by"]}.get(tool, [])
-        for parameter in parameters:
+        for parameter in PARAMETERS.get(tool, ()):
             for label, text in CORPUS.items():
                 calls[f"{tool} {parameter} {label}"] = (tool, {**base, parameter: text})
     return calls
 
 
-def result_cursor(result: types.CallToolResult) -> str:
-    """The next-page cursor of a successful list or group result."""
+def next_cursor(result: types.CallToolResult) -> str | None:
+    """The next-page cursor of a list, group or calendar result, if there is a next page."""
     structured = result.structured_content
     assert isinstance(structured, dict)
     cursor = structured["next_cursor"]
-    assert isinstance(cursor, str)
+    assert cursor is None or isinstance(cursor, str)
+    return cursor
+
+
+def result_cursor(result: types.CallToolResult) -> str:
+    """The next-page cursor of a successful list or group result with a next page."""
+    cursor = next_cursor(result)
+    assert cursor is not None
     return cursor
 
 
@@ -267,12 +343,23 @@ async def observe_gate(gate: RunningGate) -> dict[str, str]:
             channels[f"refused {name}"] = result.model_dump_json(by_alias=True)
         page = await client.call_tool(LIST_TOOL, {"limit": 1})
         channels["page"] = page.model_dump_json(by_alias=True)
-        cursor = result_cursor(page)
-        foreign_cursor_calls: list[tuple[str, dict[str, object]]] = [
-            (LIST_TOOL, {"limit": 1, "sort": "received_asc", "cursor": cursor}),
-            (LIST_TOOL, {"limit": 1, "read_status": "unread", "cursor": cursor}),
-            (GROUP_TOOL, {"group_by": "sender_handle", "cursor": cursor}),
-        ]
+        event_page = await client.call_tool(EVENTS_TOOL, {"limit": 1})
+        channels["event-page"] = event_page.model_dump_json(by_alias=True)
+        foreign_cursor_calls: list[tuple[str, dict[str, object]]] = []
+        if (cursor := next_cursor(page)) is not None:
+            foreign_cursor_calls += [
+                (LIST_TOOL, {"limit": 1, "sort": "received_asc", "cursor": cursor}),
+                (LIST_TOOL, {"limit": 1, "read_status": "unread", "cursor": cursor}),
+                (GROUP_TOOL, {"group_by": "sender_handle", "cursor": cursor}),
+            ]
+        if (cursor := next_cursor(event_page)) is not None:
+            foreign_cursor_calls += [
+                (EVENTS_TOOL, {"limit": 1, "sort": "start_desc", "cursor": cursor}),
+                (EVENTS_TOOL, {"limit": 1, "busy_status": "busy", "cursor": cursor}),
+                (OVERLAPS_TOOL, {"limit": 1, "cursor": cursor}),
+                (AVAILABILITY_TOOL, {"limit": 1, "cursor": cursor}),
+            ]
+        assert foreign_cursor_calls, "no tool had a second page, so no cursor was checked"
         for tool, arguments in foreign_cursor_calls:
             result = await client.call_tool(tool, arguments)
             channels[f"foreign cursor {tool} {sorted(arguments)}"] = result.model_dump_json(

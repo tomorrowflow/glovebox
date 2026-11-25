@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
@@ -12,22 +12,29 @@ from mcp import types
 from pydantic import BaseModel, ValidationError
 
 from glovebox.access import (
+    AVAILABILITY_OPERATION,
     COUNT_OPERATION,
     GROUP_OPERATION,
     LIST_ACCOUNTS_OPERATION,
+    LIST_EVENTS_OPERATION,
     LIST_OPERATION,
+    LIST_OVERLAPS_OPERATION,
     LIST_TOPICS_OPERATION,
     Access,
     Account,
     Grant,
 )
+from glovebox.availability import look_ahead_range, overlapping, windows
+from glovebox.calendars import open_calendar
 from glovebox.classification import QuarantinedClassifier
 from glovebox.classifier_config import ClassifierConfig
 from glovebox.credentials import CredentialsError
 from glovebox.formats import MAX_ITEMS
 from glovebox.output import (
     AccountsOutput,
+    AvailabilityOutput,
     CountOutput,
+    EventsOutput,
     GroupOutput,
     ListOutput,
     Output,
@@ -39,15 +46,24 @@ from glovebox.output import (
 from glovebox.query import (
     AccountsInput,
     CountInput,
+    EventsInput,
     Filters,
     GroupInput,
     ListInput,
+    RangeFilters,
+    RangeInput,
     TopicsInput,
     decode_cursor,
     encode_cursor,
     query_digest,
 )
-from glovebox.sources import SourceBlocked, SourceError, SyncStatus, open_source
+from glovebox.sources import (
+    CALENDAR_KINDS,
+    SourceBlocked,
+    SourceError,
+    SyncStatus,
+    open_source,
+)
 from glovebox.store import Store, window_start
 
 logger = logging.getLogger(__name__)
@@ -58,6 +74,9 @@ LIST_TOOL = LIST_OPERATION
 COUNT_TOOL = COUNT_OPERATION
 GROUP_TOOL = GROUP_OPERATION
 TOPICS_TOOL = LIST_TOPICS_OPERATION
+AVAILABILITY_TOOL = AVAILABILITY_OPERATION
+EVENTS_TOOL = LIST_EVENTS_OPERATION
+OVERLAPS_TOOL = LIST_OVERLAPS_OPERATION
 
 READ_ONLY = types.ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -81,6 +100,18 @@ SYNC_FIELDS_TEXT = (
 SYNC_TEXT = (
     f"{SYNC_FIELDS_TEXT} If an account's source cannot be read, the result is the error "
     "source_unavailable with those fields, never an empty success."
+)
+CALENDAR_TEXT = (
+    "Covers the calendar accounts the token covers, or the one named by the account handle "
+    "filter, for the next 90 days: events outside that look-ahead are not served, and one "
+    "that runs past its end is cut there. All times are UTC at minute precision. An event "
+    "holds time when its busy status is busy, tentative or unknown, and is free time when "
+    "it is free (cancelled, declined or marked as free). A range is a range_from and a "
+    "range_to (minute timestamps, either may be left out) in which an event overlaps; one "
+    "that only touches it does not. At most "
+    f"{MAX_ITEMS} entries per page; next_cursor is an opaque cursor for the next page, "
+    f"valid only for the same caller and query. {SYNC_TEXT} No event text is returned: no "
+    "title, description, location, attendee or organizer."
 )
 
 
@@ -177,6 +208,46 @@ SPECS: dict[str, ToolSpec] = {
         TopicsInput,
         TopicsOutput,
     ),
+    AVAILABILITY_TOOL: ToolSpec(
+        _definition(
+            AVAILABILITY_TOOL,
+            "Lists when the calendar owner is busy and when free in a time range, across the "
+            "calendar accounts: consecutive windows that cover the range, each busy or free, "
+            "earliest first, with events that run into each other or touch making one busy "
+            f"window. {CALENDAR_TEXT}",
+            RangeInput,
+            AvailabilityOutput,
+        ),
+        RangeInput,
+        AvailabilityOutput,
+    ),
+    EVENTS_TOOL: ToolSpec(
+        _definition(
+            EVENTS_TOOL,
+            "Lists upcoming calendar events with permitted fields only: event handle, "
+            "account handle, start, end, all-day flag and busy status (busy, tentative, free "
+            "or unknown; a status the source gave that the gate does not know is unknown). "
+            "Optional filters, combined with AND: range, account handle, busy status and "
+            f"all-day flag. Fixed sort orders only: start_asc, start_desc. {CALENDAR_TEXT}",
+            EventsInput,
+            EventsOutput,
+        ),
+        EventsInput,
+        EventsOutput,
+    ),
+    OVERLAPS_TOOL: ToolSpec(
+        _definition(
+            OVERLAPS_TOOL,
+            "Lists the events that overlap another event, in a time range and across the "
+            "calendar accounts, earliest first, with the same fields as list_events. Only "
+            "events that hold time are compared: free ones overlap nothing, and events that "
+            f"only touch do not overlap. {CALENDAR_TEXT}",
+            RangeInput,
+            EventsOutput,
+        ),
+        RangeInput,
+        EventsOutput,
+    ),
 }
 
 
@@ -252,54 +323,36 @@ class ReadTool:
         if isinstance(request, AccountsInput):
             handles = [account.handle for account in grant.accounts]
             return success_result({"accounts": self._store.account_sync(handles)})
+        if isinstance(request, RangeFilters):
+            return self._respond_calendar(name, spec, request, grant)
         if not isinstance(request, Filters):
             return error_result("internal_error", spec.output)
 
         paging: Paging | None = None
         if isinstance(request, ListInput | GroupInput):
             selector = request.sort if isinstance(request, ListInput) else request.group_by
-            digest = query_digest(name, request.only_filters(), selector)
-            # Cursors are bound to the token: another token's cursor, for any account, is
-            # as invalid as one that was never issued.
-            paging = Paging(self._store.cursor_key(), grant.token_id, digest, 0)
-            if request.cursor is not None:
-                paging = paging.resume(request.cursor)
-                if paging is None:
-                    return error_result("invalid_cursor", spec.output)
+            paging = self._paging(name, request.only_filters(), selector, request.cursor, grant)
+            if paging is None:
+                return error_result("invalid_cursor", spec.output)
         filters = request.only_filters()
         # An account handle outside the token's accounts selects nothing, exactly as one
-        # that does not exist does. Only the selected accounts are fetched.
+        # that does not exist does, and so does the handle of a calendar account. Only the
+        # selected accounts are fetched.
         selected = [
             account
             for account in grant.accounts
-            if filters.account_handle in (None, account.handle)
+            if account.kind not in CALENDAR_KINDS
+            and filters.account_handle in (None, account.handle)
         ]
 
         with self._sync:
-            fetched = []
-            failed: list[tuple[Account, SyncStatus]] = []
             now = self._clock()
-            # Every selected account is tried, so the result tells how each one stands.
-            for account in selected:
-                try:
-                    source = open_source(
-                        account.kind,
-                        account.source,
-                        account.credentials,
-                        self._imessage_max_silence,
-                    )
-                    fetched.append((account, source.fetch(window_start(now), now)))
-                except CredentialsError as error:
-                    # The message is fixed text; the account name is the operator's own label.
-                    # A credentials file that cannot be used is access that is not granted.
-                    logger.warning("account %s sync failed: blocked: %s", account.name, error)
-                    failed.append((account, "blocked"))
-                except SourceBlocked:
-                    logger.warning("account %s sync failed: blocked", account.name)
-                    failed.append((account, "blocked"))
-                except SourceError:
-                    logger.warning("account %s sync failed: stale", account.name)
-                    failed.append((account, "stale"))
+            fetched, failed = self._read_accounts(
+                selected,
+                lambda account: open_source(
+                    account.kind, account.source, account.credentials, self._imessage_max_silence
+                ).fetch(window_start(now), now),
+            )
             for account, mailbox in fetched:
                 # Each item is classified on its own, outside any database transaction;
                 # one that is unchanged since its last classification is not classified
@@ -351,6 +404,109 @@ class ReadTool:
             return success_result(
                 {"accounts": accounts, "count": self._store.count_items(handles, now, filters)}
             )
+
+    def _respond_calendar(
+        self, name: str, spec: ToolSpec, request: RangeFilters, grant: Grant
+    ) -> types.CallToolResult:
+        if not isinstance(request, RangeInput | EventsInput):
+            return error_result("internal_error", spec.output)
+        selector = request.sort if isinstance(request, EventsInput) else ""
+        paging = self._paging(name, request.only_filters(), selector, request.cursor, grant)
+        if paging is None:
+            return error_result("invalid_cursor", spec.output)
+        # As for items: an account handle that is not a calendar account of this token selects
+        # nothing.
+        selected = [
+            account
+            for account in grant.accounts
+            if account.kind in CALENDAR_KINDS and request.account_handle in (None, account.handle)
+        ]
+
+        with self._sync:
+            now = self._clock()
+            fetched, failed = self._read_accounts(
+                selected,
+                lambda account: open_calendar(
+                    account.kind, account.source, account.credentials
+                ).fetch_events(now),
+            )
+            for account, calendar in fetched:
+                self._store.commit_calendar(account.handle, account.kind, calendar, now)
+            for account, status in failed:
+                self._store.mark_unsynced(account.handle, account.kind, status)
+            handles = [account.handle for account in selected]
+            accounts = self._store.account_sync(handles)
+            if failed:
+                return error_result("source_unavailable", spec.output, accounts)
+            page = self._calendar_page(name, request, handles, now, paging)
+            return success_result({"accounts": accounts, **page})
+
+    def _calendar_page(
+        self,
+        name: str,
+        request: RangeInput | EventsInput,
+        handles: Sequence[str],
+        now: datetime,
+        paging: "Paging",
+    ) -> dict[str, object]:
+        """One page of what a calendar tool answers, as stored, and the cursor of the next."""
+        # One row past the page tells whether there is a next one.
+        wanted = request.limit + 1
+        if isinstance(request, EventsInput):
+            key = "events"
+            rows = self._store.list_events(
+                handles, now, request.only_filters(), request.sort, wanted, paging.offset
+            )
+        else:
+            start, end = look_ahead_range(now, request.range_from, request.range_to)
+            blocking = self._store.blocking_events(handles, now, start, end)
+            if name == AVAILABILITY_TOOL:
+                key = "windows"
+                every = windows([(event["start"], event["end"]) for event in blocking], start, end)
+            else:
+                key = "events"
+                every = [dict(event) for event in overlapping(blocking)]
+            rows = every[paging.offset : paging.offset + wanted]
+        page = rows[: request.limit]
+        return {key: page, "next_cursor": paging.next(len(page), len(rows) > len(page))}
+
+    def _paging(
+        self, name: str, filters: BaseModel, selector: str, cursor: str | None, grant: Grant
+    ) -> "Paging | None":
+        """Where the requested page starts: the first, or the one `cursor` stands for. None if
+        the cursor is not valid for this caller and query.
+
+        Cursors are bound to the token: another token's cursor, for any account, is as invalid
+        as one that was never issued.
+        """
+        digest = query_digest(name, filters, selector)
+        paging = Paging(self._store.cursor_key(), grant.token_id, digest, 0)
+        return paging if cursor is None else paging.resume(cursor)
+
+    def _read_accounts[T](
+        self, accounts: Sequence[Account], read: Callable[[Account], T]
+    ) -> tuple[list[tuple[Account, T]], list[tuple[Account, SyncStatus]]]:
+        """Read each account's source, and tell which could not be read and how it stands.
+
+        Every account is tried, so the result tells how each one stands.
+        """
+        fetched: list[tuple[Account, T]] = []
+        failed: list[tuple[Account, SyncStatus]] = []
+        for account in accounts:
+            try:
+                fetched.append((account, read(account)))
+            except CredentialsError as error:
+                # The message is fixed text; the account name is the operator's own label.
+                # A credentials file that cannot be used is access that is not granted.
+                logger.warning("account %s sync failed: blocked: %s", account.name, error)
+                failed.append((account, "blocked"))
+            except SourceBlocked:
+                logger.warning("account %s sync failed: blocked", account.name)
+                failed.append((account, "blocked"))
+            except SourceError:
+                logger.warning("account %s sync failed: stale", account.name)
+                failed.append((account, "stale"))
+        return fetched, failed
 
 
 def _permitted_spec(name: str, operations: frozenset[str]) -> ToolSpec | None:

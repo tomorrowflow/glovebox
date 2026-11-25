@@ -19,11 +19,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from glovebox.calendars import BusyStatus
 from glovebox.fields import ClassificationStatus, Cursor, Handle, Minute, TopicId, YesNoUnknown
 from glovebox.formats import CURSOR_LENGTH, MAX_ITEMS
 from glovebox.sources import ReadStatus
 
 SortOrder = Literal["received_desc", "received_asc", "unread_first", "attachments_first"]
+EventSortOrder = Literal["start_asc", "start_desc"]
 GroupBy = Literal[
     "sender_handle",
     "thread_handle",
@@ -82,6 +84,47 @@ class CountInput(Filters):
     pass
 
 
+class RangeFilters(BaseModel):
+    """The filters of the calendar tools, all optional. A range is a time range in which an
+    event overlaps; without one the whole look-ahead is meant. A range that does not end after
+    it starts selects nothing."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    range_from: Minute | None = None
+    range_to: Minute | None = None
+    account_handle: Handle | None = None
+
+
+class EventFilters(RangeFilters):
+    busy_status: BusyStatus | None = None
+    all_day: bool | None = None
+
+
+class RangeInput(RangeFilters):
+    """The input of the availability and overlap tools: a range and a page."""
+
+    limit: int = Field(default=MAX_ITEMS, ge=1, le=MAX_ITEMS)
+    cursor: Cursor | None = None
+
+    def only_filters(self) -> RangeFilters:
+        return _restricted(self, RangeFilters)
+
+
+class EventsInput(EventFilters):
+    sort: EventSortOrder = "start_asc"
+    limit: int = Field(default=MAX_ITEMS, ge=1, le=MAX_ITEMS)
+    cursor: Cursor | None = None
+
+    def only_filters(self) -> EventFilters:
+        return _restricted(self, EventFilters)
+
+
+def _restricted[M: BaseModel](request: BaseModel, filters: type[M]) -> M:
+    """The filter fields of `request` alone, without its sort, page size or cursor."""
+    return filters(**{name: getattr(request, name) for name in filters.model_fields})
+
+
 class TopicsInput(BaseModel):
     """`list_topics` takes no arguments."""
 
@@ -94,7 +137,7 @@ class GroupInput(Filters):
     cursor: Cursor | None = None
 
 
-def query_digest(tool: str, filters: Filters, selector: str) -> bytes:
+def query_digest(tool: str, filters: BaseModel, selector: str) -> bytes:
     """What a cursor is bound to: the tool, the filters and the sort order or grouping.
 
     The page size is left out on purpose: a client may change it between pages.
