@@ -25,11 +25,15 @@ class ConfigError(Exception):
 class Settings:
     db_path: Path
     # The operator's topic list, deadline range and inference settings; read by the service
-    # at startup. Unset means no classifier is configured.
+    # at startup. Unset means the defaults: an empty topic list and local inference.
     classifier_config: Path | None = None
     # Test-only controls of the stub classifier: its script, and a record of its calls.
     stub_script: Path | None = None
     stub_probe: Path | None = None
+    # The addresses of the inference stand-ins, which the throwaway and test stacks set; they
+    # replace the address in the classifier configuration. Unset on a real deployment.
+    standin_inference_local: str | None = None
+    standin_inference_external: str | None = None
     # Pins the clock the 30-day window is measured from. For tests and fixture stacks only:
     # real time is used when this is unset.
     fixed_now: datetime | None = None
@@ -51,6 +55,8 @@ class Settings:
             classifier_config=_path(env.get("GLOVEBOX_CLASSIFIER_CONFIG")),
             stub_script=_path(env.get("GLOVEBOX_STUB_CLASSIFIER_SCRIPT")),
             stub_probe=_path(env.get("GLOVEBOX_STUB_CLASSIFIER_PROBE")),
+            standin_inference_local=env.get("GLOVEBOX_STANDIN_INFERENCE_LOCAL") or None,
+            standin_inference_external=env.get("GLOVEBOX_STANDIN_INFERENCE_EXTERNAL") or None,
             fixed_now=parse_fixed_now(env.get("GLOVEBOX_FIXED_NOW")),
             allowed_hosts=parse_allowed_hosts(env.get("GLOVEBOX_ALLOWED_HOSTS")),
             imessage_max_silence=parse_max_silence(env.get(MAX_SILENCE_VAR)),

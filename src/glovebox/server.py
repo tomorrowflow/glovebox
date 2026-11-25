@@ -9,7 +9,7 @@ by accident.
 """
 
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from importlib.metadata import version
 
 from mcp import types
@@ -21,7 +21,9 @@ from glovebox.access import Access
 from glovebox.auth import PRINCIPAL_KEY, AgentTokenMiddleware
 from glovebox.classification import Classifier, QuarantinedClassifier
 from glovebox.classifier_config import ClassifierConfig, load_classifier_config
-from glovebox.config import Settings
+from glovebox.config import ConfigError, Settings
+from glovebox.credentials import CredentialsError, read_credentials
+from glovebox.inference import InferenceClassifier
 from glovebox.store import Store
 from glovebox.stub import StubClassifier
 from glovebox.tool import ReadTool
@@ -31,11 +33,39 @@ LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 
 
-def build_classifier(settings: Settings, config: ClassifierConfig) -> QuarantinedClassifier:
-    backend: Classifier | None = None
-    if config.backend == "stub":
-        backend = StubClassifier.from_files(settings.stub_script, settings.stub_probe)
-    return QuarantinedClassifier(backend, config.topics, config.deadline_range)
+def build_classifiers(
+    settings: Settings, config: ClassifierConfig
+) -> Callable[[str], QuarantinedClassifier]:
+    """The quarantined classifier to use for an account, by the account's name.
+
+    Each account has exactly one backend: its route in the configuration. There is no
+    other classifier to turn to when it fails.
+    """
+    key_file = config.external.key_file if config.external else None
+    if key_file is not None:
+        try:
+            read_credentials(key_file)
+        except CredentialsError as error:
+            raise ConfigError(f"inference.external.api_key_file: {error}") from None
+    classifiers: dict[str | None, QuarantinedClassifier] = {}
+
+    def make(route: str | None) -> QuarantinedClassifier:
+        backend: Classifier | None = None
+        if route == "stub":
+            backend = StubClassifier.from_files(settings.stub_script, settings.stub_probe)
+        elif route == "local":
+            backend = InferenceClassifier(config.local, route)
+        elif route == "external" and config.external is not None:
+            backend = InferenceClassifier(config.external, route)
+        return QuarantinedClassifier(backend, config.topics, config.deadline_range)
+
+    def for_account(name: str) -> QuarantinedClassifier:
+        route = config.route(name)
+        if route not in classifiers:
+            classifiers[route] = make(route)
+        return classifiers[route]
+
+    return for_account
 
 
 def principal_of_request(ctx: ServerRequestContext) -> str | None:
@@ -79,13 +109,15 @@ def transport_security(allowed_hosts: Sequence[str]) -> TransportSecuritySetting
 
 def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or Settings.from_env(os.environ)
-    config = load_classifier_config(settings.classifier_config)
+    config = load_classifier_config(settings.classifier_config).resolved(
+        settings.standin_inference_local, settings.standin_inference_external
+    )
     access = Access(settings.db_path)
     tool = ReadTool(
         Store(settings.db_path),
         access,
         settings.clock(),
-        build_classifier(settings, config),
+        build_classifiers(settings, config),
         config,
         settings.imessage_max_silence,
     )

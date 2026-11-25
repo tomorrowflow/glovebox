@@ -173,7 +173,7 @@ async def test_messenger_items_have_the_fields_of_mail_items_with_a_conversation
         assert item["source_kind"] == MESSENGER
         for name in ("item_handle", "account_handle", "sender_handle", "thread_handle"):
             assert HANDLE.match(item[name])
-        # Nothing here is classified yet: no classifier is configured.
+        # Nothing here is classified: no local runtime answers in the test harness.
         assert item["classification_status"] == "unavailable"
     assert len({item["item_handle"] for item in items}) == 5
     # The conversation handle takes the place of the thread handle: one per conversation,

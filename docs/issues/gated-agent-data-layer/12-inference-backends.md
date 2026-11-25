@@ -6,7 +6,7 @@
 
 **Blocked by:** 01, 02, 05, 09
 
-**Status:** ready-for-agent
+**Status:** implemented (GLB-1.20); the operator-run item remains, see `docs/inference.md`
 
 - [ ] With no inference configuration, classification uses local inference.
 - [ ] External inference is used only for accounts where the operator enabled it explicitly; it is configured per account, outside MCP.
