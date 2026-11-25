@@ -1,7 +1,7 @@
 {
   "type": "architecture",
   "title": "src/glovebox",
-  "subtitle": "The gate: operator-issued agent tokens, five read tools (accounts, list, count, group, topic IDs), fixture mail source, SQLite store and the output validator",
+  "subtitle": "The gate: operator-issued agent tokens, eight read tools for items and calendars, fixture mail, messenger and calendar sources, SQLite store, output validator",
   "dir": "LR",
   "motion": "trace",
   "nodes": [
@@ -9,10 +9,10 @@
     {"id": "uvicorn", "label": "uvicorn", "sub": "ASGI server", "kind": "external", "row": 0, "col": 1},
     {"id": "auth", "label": "Agent token", "sub": "auth.py, 401 before dispatch", "row": 0, "col": 2},
     {"id": "mcp", "label": "MCP Server", "sub": "server.py, tools per token", "row": 0, "col": 3},
-    {"id": "tool", "label": "ReadTool", "sub": "accounts, list, count, group, topics", "focal": true, "row": 0, "col": 4},
+    {"id": "tool", "label": "ReadTool", "sub": "accounts, items, topics, calendar", "focal": true, "row": 0, "col": 4},
     {"id": "main", "label": "main()", "sub": "__main__.py, serve or operator commands", "row": 1, "col": 1},
-    {"id": "source", "label": "Fixture sources", "sub": "sources.py, mail and messenger, file or stand-in", "kind": "external", "row": 1, "col": 3},
-    {"id": "store", "label": "SQLite store", "sub": "handles, items, classifications, tokens", "row": 1, "col": 4},
+    {"id": "source", "label": "Fixture sources", "sub": "sources.py, calendars.py; file or stand-in", "kind": "external", "row": 1, "col": 3},
+    {"id": "store", "label": "SQLite store", "sub": "handles, items, events, classifications, tokens", "row": 1, "col": 4},
     {"id": "validator", "label": "Output validator", "sub": "output.py release()", "row": 2, "col": 4}
   ],
   "edges": [
@@ -30,18 +30,18 @@
     {"id": "uvicorn", "file": "src/glovebox/cli.py", "line": 195, "note": "uvicorn.run serves the app."},
     {"id": "auth", "file": "src/glovebox/auth.py", "line": 17, "note": "Outermost middleware; looks the bearer token up in the database on every request, so a revoked token stops at once, and records the token's id, which page cursors and the token's accounts are bound to."},
     {"id": "mcp", "file": "src/glovebox/server.py", "line": 42, "note": "Low-level Server with only tools/list and tools/call handlers: no resources, prompts or operator commands. A token is shown only the tools its operations name."},
-    {"id": "tool", "file": "src/glovebox/tool.py", "line": 183, "note": "Validates the call's inputs, checks the cursor, fetches only the token's accounts, records each failed sync as stale or blocked and answers it with the fixed outage error and the accounts' freshness, classifies the items that need it (see classifier.json), and otherwise answers from the store; the sort orders, filters and the 1000+ cap live in store.py."},
+    {"id": "tool", "file": "src/glovebox/tool.py", "line": 254, "note": "Validates the call's inputs, checks the cursor, fetches only the token's accounts of the kind the tool reads (items for the item tools, calendars for the three calendar tools), records each failed sync as stale or blocked and answers it with the fixed outage error and the accounts' freshness, classifies the items that need it (see classifier.json), and otherwise answers from the store; the sort orders, filters and the 1000+ cap live in store.py, the busy and free windows and overlaps in availability.py."},
     {"id": "main", "file": "src/glovebox/__main__.py", "line": 12, "note": "With no command, serves; account and token commands are the operator's local command line (cli.py), which opens the database file directly."},
-    {"id": "source", "file": "src/glovebox/sources.py", "line": 87, "note": "The only code that sees raw upstream structure, for a mail account, a messenger account (direct and group conversations alike) or an iMessage account (a bridge document over GET, or the Messages database opened read-only by chatdb.py); reads an item's subject and body, or a message's text and caption, only for the classifier, never to store or serve. open_source checks the account's credentials file mode first. Tells a refused source from a down one and counts the items it could not parse."},
-    {"id": "store", "file": "src/glovebox/store.py", "line": 89, "note": "Permitted fields, semantic fields, keyed-digest handle and content mappings and sync state (status, last successful sync, skipped count); no raw text. Mail outside the 30-day window is not stored. Accounts and token digests live in the same file (access.py)."},
-    {"id": "validator", "file": "src/glovebox/output.py", "line": 146, "note": "Checks the whole result; a failure becomes the fixed response_invalid error."},
+    {"id": "source", "file": "src/glovebox/sources.py", "line": 87, "note": "The only code that sees raw upstream structure, for a mail account, a messenger account (direct and group conversations alike) or an iMessage account (a bridge document over GET, or the Messages database opened read-only by chatdb.py); reads an item's subject and body, or a message's text and caption, only for the classifier, never to store or serve. open_source checks the account's credentials file mode first. Tells a refused source from a down one and counts the items it could not parse. A calendar account's document is read by calendars.py, which keeps only each event's UID (for its handle), times and a busy status, and expands recurring events."},
+    {"id": "store", "file": "src/glovebox/store.py", "line": 98, "note": "Permitted fields, semantic fields, keyed-digest handle and content mappings and sync state (status, last successful sync, skipped count); no raw text. Mail outside the 30-day window and events outside the 90-day look-ahead are not stored. Accounts and token digests live in the same file (access.py)."},
+    {"id": "validator", "file": "src/glovebox/output.py", "line": 183, "note": "Checks the whole result; a failure becomes the fixed response_invalid error."},
     {"id": "client>uvicorn", "file": "tests/client.py", "line": 29},
     {"id": "uvicorn>auth", "file": "src/glovebox/server.py", "line": 73, "note": "add_middleware makes the token check the outermost layer of the app."},
     {"id": "auth>mcp", "file": "src/glovebox/auth.py", "line": 31},
     {"id": "mcp>tool", "file": "src/glovebox/server.py", "line": 51},
-    {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 285},
-    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 307},
-    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 236},
+    {"id": "tool>source", "file": "src/glovebox/tool.py", "line": 352},
+    {"id": "tool>store", "file": "src/glovebox/tool.py", "line": 381},
+    {"id": "tool>validator", "file": "src/glovebox/tool.py", "line": 307},
     {"id": "main>uvicorn", "file": "src/glovebox/cli.py", "line": 195}
   ]
 }
