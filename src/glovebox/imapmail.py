@@ -10,13 +10,14 @@ never read out of the message (ADR 0004). Nothing is copied: the mail is read wh
 
 Only four IMAP commands past login are ever sent: `EXAMINE`, `UID SEARCH`, `UID FETCH` with
 peeking items, and `LOGOUT`. That is gateway-enforced read-only: an IMAP login can also
-write, and mailbox.org offers no read-only credential for it, so the protection is that the
-gate has no code path that sends anything else (ADR 0003).
+write, no read-only IMAP credential is known to exist at mailbox.org (docs/mailbox-org-mail.md), so
+the protection is that the gate has no code path that sends anything else (ADR 0003).
 
 The IMAP library is IMAPClient. This module raises its own errors, with no detail on purpose:
 what a server or a message says stays out of exceptions, logs and responses.
 """
 
+import ipaddress
 import logging
 import ssl
 import time
@@ -40,6 +41,7 @@ logging.getLogger("imapclient").setLevel(logging.CRITICAL)
 
 FOLDER = "INBOX"
 DEFAULT_TLS_PORT = 993
+PLAIN_PORT = 143
 # The most messages one read returns. A window holding more is cut to the newest, and the
 # rest is reported as skipped, so that the account is `incomplete`, not `current`.
 MAX_MESSAGES = 2000
@@ -50,7 +52,6 @@ BATCH_SIZE = 100
 CONNECT_TIMEOUT_SECONDS = 10
 # One read, connection to logout, is cut off after this long wherever the server stalls.
 READ_DEADLINE_SECONDS = 60
-MAX_TEXT_CHARS = 16_000  # the same limit as every source's text
 FETCH_ITEMS = ["FLAGS", "INTERNALDATE", "BODYSTRUCTURE", f"BODY.PEEK[]<0.{MAX_MESSAGE_BYTES}>"]
 BODY_KEY = b"BODY[]<0>"
 SEEN = b"\\Seen"
@@ -102,7 +103,11 @@ class InboxRead:
 
 
 def is_loopback_host(host: str) -> bool:
-    return host == "localhost" or host.startswith("127.") or host == "::1"
+    """Whether a host name or address is this host: `localhost`, or a loopback address."""
+    try:
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def location_problem(source: str) -> str | None:
@@ -132,7 +137,7 @@ def location_of(source: str) -> Location:
     parts = urlsplit(source)
     tls = parts.scheme == "imaps"
     assert parts.hostname is not None
-    return Location(parts.hostname, parts.port or (DEFAULT_TLS_PORT if tls else 143), tls)
+    return Location(parts.hostname, parts.port or (DEFAULT_TLS_PORT if tls else PLAIN_PORT), tls)
 
 
 def login_of(secret: Secret) -> Login | None:
@@ -145,7 +150,7 @@ def login_of(secret: Secret) -> Login | None:
 
 
 def read_inbox(location: Location, login: Login, since: datetime) -> InboxRead:
-    """The inbox's messages received on or after `since` (UTC), or some days before it.
+    """The inbox's messages received on or after `since` (UTC), and possibly up to a day before it.
 
     Raises MailboxBlocked if the server refuses the login and MailboxError for any other
     failure.
@@ -210,9 +215,9 @@ def _fetch(
         found: list[InboxMessage] = []
         unreadable = 0
         for uid in uids:
-            more, fewer = _fetch(client, [uid], validity)
-            found.extend(more)
-            unreadable += fewer
+            one, skipped = _fetch(client, [uid], validity)
+            found.extend(one)
+            unreadable += skipped
         return found, unreadable
     messages: list[InboxMessage] = []
     unreadable = len(uids) - len(response)  # asked for, and not answered
@@ -303,7 +308,7 @@ class _Text(HTMLParser):
 
 
 def _text_of(message: EmailMessage) -> str:
-    """The subject and the readable body, cut to the classifier's limit."""
+    """The subject and the readable body."""
     subject = str(message["Subject"] or "")
     body = message.get_body(preferencelist=("plain", "html"))
     content = body.get_content() if body is not None else ""
@@ -311,4 +316,4 @@ def _text_of(message: EmailMessage) -> str:
         extractor = _Text()
         extractor.feed(content)
         content = " ".join(extractor.parts)
-    return f"{subject}\n\n{content}"[:MAX_TEXT_CHARS]
+    return f"{subject}\n\n{content}"

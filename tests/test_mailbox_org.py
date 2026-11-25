@@ -535,7 +535,16 @@ def test_the_login_is_sent_only_over_verified_tls_beyond_this_host(
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
 
 
-@pytest.mark.parametrize("source", ["imap://imap.mailbox.org", "imap://10.0.0.5", "imaps://"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "imap://imap.mailbox.org",
+        "imap://10.0.0.5",
+        "imap://127.evil.example",
+        "imap://localhost.evil.example",
+        "imaps://",
+    ],
+)
 def test_a_source_that_would_send_the_login_in_clear_across_a_network_is_blocked(
     source: str,
 ) -> None:

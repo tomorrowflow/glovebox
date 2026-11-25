@@ -20,13 +20,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 from pathlib import Path
-from typing import Literal, Protocol, get_args
+from typing import Final, Literal, Protocol, get_args
 from urllib.parse import urlsplit
 
 from glovebox import chatdb, imapmail
 from glovebox.credentials import Secret, read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
+MAILBOX_ORG_KIND: Final = "mailbox_org_mail"
 SourceKind = Literal["fixture_mail", "fixture_messenger", "imessage", "mailbox_org_mail"]
 # Who stops a write to the source. `provider`: the access method cannot write at all, so the
 # gate could not write if it tried. `gateway`: the access method could write and the gate has
@@ -42,7 +43,7 @@ SOURCE_KINDS: tuple[str, ...] = get_args(SourceKind)
 READ_ONLY_ENFORCEMENT: dict[str, ReadOnlyEnforcement] = dict.fromkeys(SOURCE_KINDS, "gateway")
 # Kinds whose account must name a credentials file. The fixture kinds and the iMessage
 # source (a local file, or a stand-in that asks for none) need none.
-CREDENTIALS_REQUIRED: frozenset[str] = frozenset({"mailbox_org_mail"})
+CREDENTIALS_REQUIRED: frozenset[str] = frozenset({MAILBOX_ORG_KIND})
 HTTP_SCHEMES = ("http", "https")
 IMAP_SCHEMES = ("imap", "imaps")
 
@@ -297,7 +298,7 @@ class MailboxOrgMailSource:
     read afresh at each fetch, and none is kept.
     """
 
-    kind: SourceKind = "mailbox_org_mail"
+    kind: SourceKind = MAILBOX_ORG_KIND
 
     def __init__(self, source: str, credentials: Secret) -> None:
         self._source = source
@@ -329,11 +330,11 @@ class MailboxOrgMailSource:
                     received=message.received.replace(second=0, microsecond=0),
                     read_status="read" if message.read else "unread",
                     has_attachments=message.has_attachments,
-                    text=message.text,
+                    text=message.text[:MAX_TEXT_CHARS],
                 ),
             )
         return SourceMailbox(
-            account_key="mailbox_org_mail", items=list(items.values()), skipped=skipped
+            account_key=MAILBOX_ORG_KIND, items=list(items.values()), skipped=skipped
         )
 
 
@@ -515,7 +516,7 @@ def open_source(
     Raises CredentialsError, which carries no detail, if the file cannot be used.
     """
     secret = read_credentials(credentials) if credentials is not None else None
-    if kind == "mailbox_org_mail":
+    if kind == MAILBOX_ORG_KIND:
         if secret is None:
             raise SourceBlocked
         return MailboxOrgMailSource(location, secret)

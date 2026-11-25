@@ -22,12 +22,12 @@ from glovebox.sources import (
     BEARER_KINDS,
     HTTP_SCHEMES,
     IMAP_SCHEMES,
+    MAILBOX_ORG_KIND,
     SOURCE_KINDS,
     bridge_problem,
 )
 
 DEFAULT_HOST = "127.0.0.1"
-MAILBOX_ORG_KIND = "mailbox_org_mail"
 DEFAULT_PORT = 8765
 FIXTURE_ACCOUNT = "fixture"
 FIXTURE_TOKEN_VAR = "GLOVEBOX_FIXTURE_TOKEN"

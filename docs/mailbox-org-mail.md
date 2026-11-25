@@ -13,7 +13,7 @@ The gate logs in to `imap.mailbox.org` over IMAP with TLS (port 993) and reads t
 | Python's `imaplib` alone | Standard library, but the response parsing (`BODYSTRUCTURE`, literals, dates) would be ours to write and keep correct against hostile input. Not adopted. |
 | A sync tool (`mbsync`, `offlineimap`) | Makes a full local copy of the mail: the raw archive ADR 0004 rules out. Not adopted. |
 
-I could not reach mailbox.org's documentation while building this (no outside access), so nothing below about the provider is from its pages. **Re-check at setup:** the server name and port (`imap.mailbox.org`, 993, TLS), and whether mailbox.org lets you create an app password limited to read-only access (see "Read-only enforcement").
+Library versions above come from PyPI (via `pip`). I could not open any web page, mailbox.org's documentation included, while building this, so nothing below about the provider is from its pages. **Re-check at setup:** the server name and port (`imap.mailbox.org`, 993, TLS), and whether mailbox.org lets you create an app password limited to read-only access (see "Read-only enforcement").
 
 ## What an item is
 
@@ -23,7 +23,7 @@ I could not reach mailbox.org's documentation while building this (no outside ac
 - `read_status` is `read` if the message has the `\Seen` flag, else `unread`. The gate never sets it.
 - `has_attachments` comes from the message's `BODYSTRUCTURE`: a part whose disposition is `attachment`, or a part with no disposition that is not text, not a signature and not inside `multipart/related` (the images of an HTML body). An inline image with a disposition of `inline` is not an attachment. Only the disposition's type is read, never a name. This is a rule of thumb: a mail client may draw the paperclip differently for an unusual message.
 - The subject and the text part (the plain part, else the HTML part with its tags removed) go to the quarantined classifier in memory, cut to 16,000 characters, and nowhere else: the gate stores, logs and serves none of it. Of each message the gate fetches the first 64 KiB, so a very large message's text is cut there.
-- The window's mail is re-read at every tool call, like every source; only the window's messages are asked for (`SINCE`, a day early, and the gate drops what is older). A window with more than 2,000 messages is cut to the newest 2,000 and the rest is reported as skipped, so the account is `incomplete`, never `current`. A message the gate cannot understand (no sender, a date or structure the library cannot parse) is skipped and counted, and the account is `incomplete`.
+- The window's mail is re-read at every tool call, like every source; only the window's messages are asked for (`SINCE`, a day early, and the gate drops what is older). A window with more than 2,000 messages is cut to the 2,000 highest UIDs (the most recently delivered) and the rest is reported as skipped, so the account is `incomplete`, never `current`. A message the gate cannot understand (no sender, a date or structure the library cannot parse) is skipped and counted, and the account is `incomplete`.
 - A message's handle is bound to the mailbox's `UIDVALIDITY` and the message's UID. If the server renumbers the mailbox (a new `UIDVALIDITY`, rare) the messages get new handles.
 
 ## Read-only enforcement: gateway-only
