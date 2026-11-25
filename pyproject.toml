@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anyio==4.16.0",
+    "imapclient==4.3.0",
     "mcp==2.3.0",
     "pydantic==2.14.3",
     "starlette==1.10.0",
@@ -43,3 +44,8 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# IMAPClient ships neither stubs nor a py.typed marker.
+module = ["imapclient", "imapclient.*"]
+ignore_missing_imports = true

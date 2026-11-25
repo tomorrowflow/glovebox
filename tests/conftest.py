@@ -99,7 +99,7 @@ def provision(
         if (fields := line.split("\t"))
     }
     for name, source in accounts.items():
-        location = str(source) if str(source).startswith("http") else str(Path(source).absolute())
+        location = str(source) if "://" in str(source) else str(Path(source).absolute())
         if name not in existing:
             kind = (kinds or {}).get(name, "fixture_mail")
             added = operator(db, "account", "add", name, "--kind", kind, "--source", location)

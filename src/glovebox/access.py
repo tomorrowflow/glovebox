@@ -99,7 +99,7 @@ class Access:
         if kind not in SOURCE_KINDS:
             raise AccessError(f"unknown source kind, expected one of: {', '.join(SOURCE_KINDS)}")
         if not source or not source.isprintable():
-            raise AccessError("the source must be a file path or an http(s) URL")
+            raise AccessError("the source must be a file path or a URL")
         if kind in CREDENTIALS_REQUIRED and credentials is None:
             raise AccessError(f"source kind {kind} needs a credentials file")
         # Made absolute without following symlinks: a symlinked secret stays one.

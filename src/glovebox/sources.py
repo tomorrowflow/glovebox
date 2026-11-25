@@ -23,14 +23,15 @@ from pathlib import Path
 from typing import Literal, Protocol, get_args
 from urllib.parse import urlsplit
 
-from glovebox import chatdb
+from glovebox import chatdb, imapmail
 from glovebox.credentials import Secret, read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
-SourceKind = Literal["fixture_mail", "fixture_messenger", "imessage"]
+SourceKind = Literal["fixture_mail", "fixture_messenger", "imessage", "mailbox_org_mail"]
 # Who stops a write to the source. `provider`: the access method cannot write at all, so the
 # gate could not write if it tried. `gateway`: the access method could write and the gate has
-# no code path that does (ADR 0003). No source has a provider-enforced read-only access yet.
+# no code path that does (ADR 0003). No source has a provider-enforced read-only access yet:
+# an IMAP login, mailbox.org's included, can write.
 ReadOnlyEnforcement = Literal["gateway", "provider"]
 # How fresh and complete an account's data is. `current`: the last sync read the whole
 # source. `incomplete`: it did, but some items could not be understood and are missing.
@@ -41,7 +42,9 @@ SOURCE_KINDS: tuple[str, ...] = get_args(SourceKind)
 READ_ONLY_ENFORCEMENT: dict[str, ReadOnlyEnforcement] = dict.fromkeys(SOURCE_KINDS, "gateway")
 # Kinds whose account must name a credentials file. The fixture kinds and the iMessage
 # source (a local file, or a stand-in that asks for none) need none.
-CREDENTIALS_REQUIRED: frozenset[str] = frozenset()
+CREDENTIALS_REQUIRED: frozenset[str] = frozenset({"mailbox_org_mail"})
+HTTP_SCHEMES = ("http", "https")
+IMAP_SCHEMES = ("imap", "imaps")
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 10
@@ -285,6 +288,55 @@ class IMessageSource(FixtureSource):
         return SourceMailbox(account_key="imessage", items=list(items.values()), skipped=skipped)
 
 
+class MailboxOrgMailSource:
+    """The operator's mailbox.org inbox, read over IMAP and never changed; see
+    `glovebox.imapmail`.
+
+    The source is `imaps://imap.mailbox.org`; the credentials file holds the login, the user
+    name on the first line and the password on the second. Every message of the window is
+    read afresh at each fetch, and none is kept.
+    """
+
+    kind: SourceKind = "mailbox_org_mail"
+
+    def __init__(self, source: str, credentials: Secret) -> None:
+        self._source = source
+        self._credentials = credentials
+
+    def fetch(self, since: datetime, now: datetime) -> SourceMailbox:
+        try:
+            login = imapmail.login_of(self._credentials)
+            if login is None:
+                raise SourceBlocked
+            found = imapmail.read_inbox(imapmail.location_of(self._source), login, since)
+        except imapmail.MailboxBlocked:
+            raise SourceBlocked from None
+        except imapmail.MailboxError:
+            raise SourceError from None
+        items: dict[str, SourceItem] = {}
+        skipped = found.skipped
+        for message in found.messages:
+            sender_key = sender_key_of(message.sender)
+            if sender_key is None:
+                skipped += 1
+                continue
+            items.setdefault(
+                message.key,
+                SourceItem(
+                    upstream_id=message.key,
+                    sender_key=sender_key,
+                    thread_key=message.thread,
+                    received=message.received.replace(second=0, microsecond=0),
+                    read_status="read" if message.read else "unread",
+                    has_attachments=message.has_attachments,
+                    text=message.text,
+                ),
+            )
+        return SourceMailbox(
+            account_key="mailbox_org_mail", items=list(items.values()), skipped=skipped
+        )
+
+
 def parse_conversations(document: object) -> SourceMailbox:
     if not isinstance(document, Mapping):
         raise SourceError
@@ -463,10 +515,14 @@ def open_source(
     Raises CredentialsError, which carries no detail, if the file cannot be used.
     """
     secret = read_credentials(credentials) if credentials is not None else None
+    if kind == "mailbox_org_mail":
+        if secret is None:
+            raise SourceBlocked
+        return MailboxOrgMailSource(location, secret)
     adapter = FIXTURE_SOURCES.get(kind)
     if adapter is None:
         raise SourceError
-    is_url = urlsplit(location).scheme in ("http", "https")
+    is_url = urlsplit(location).scheme in HTTP_SCHEMES
     where = location if is_url else Path(location)
     bearer = secret if is_url and kind in BEARER_KINDS else None
     if adapter is IMessageSource:
