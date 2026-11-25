@@ -14,8 +14,8 @@ from typing import Literal
 from mcp import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from glovebox.calendars import BusyStatus
 from glovebox.fields import (
+    BusyStatus,
     ClassificationStatus,
     Count,
     Cursor,

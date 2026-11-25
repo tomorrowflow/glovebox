@@ -19,8 +19,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from glovebox.calendars import BusyStatus
-from glovebox.fields import ClassificationStatus, Cursor, Handle, Minute, TopicId, YesNoUnknown
+from glovebox.fields import (
+    BusyStatus,
+    ClassificationStatus,
+    Cursor,
+    Handle,
+    Minute,
+    TopicId,
+    YesNoUnknown,
+)
 from glovebox.formats import CURSOR_LENGTH, MAX_ITEMS
 from glovebox.sources import ReadStatus
 

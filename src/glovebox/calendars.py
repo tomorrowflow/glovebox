@@ -17,11 +17,12 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from glovebox.credentials import read_credentials
+from glovebox.fields import BusyStatus
 from glovebox.formats import LOOK_AHEAD_DAYS
 from glovebox.sources import (
     CALENDAR_KINDS,
@@ -29,11 +30,6 @@ from glovebox.sources import (
     SourceError,
     SourceKind,
 )
-
-# Whether an event holds the operator's time. `busy`: it does. `tentative`: it may. `free`: it
-# does not (cancelled, declined or marked as free time). `unknown`: the source said something
-# outside this vocabulary, which is never taken to mean free.
-BusyStatus = Literal["busy", "tentative", "free", "unknown"]
 
 # The statuses that hold time: busy and tentative events, and ones that might be either.
 # They make busy windows and can overlap; free ones do neither.
@@ -95,7 +91,7 @@ class CalendarSource(Protocol):
 
 def look_ahead(now: datetime) -> tuple[datetime, datetime]:
     """The start of the look-ahead, `now` at minute precision, and its end, 90 days on."""
-    start = now.replace(second=0, microsecond=0)
+    start = _minute(now)
     return start, start + timedelta(days=LOOK_AHEAD_DAYS)
 
 
@@ -209,8 +205,8 @@ def _occurrences_of(raw: object, default_zone: tzinfo, now: datetime) -> list[So
         events.append(
             SourceEvent(
                 upstream_id=uid if rule is None else f"{uid}\0{day.isoformat()}",
-                start=served[0].replace(second=0, microsecond=0),
-                end=served[1].replace(second=0, microsecond=0),
+                start=_minute(served[0]),
+                end=_minute(served[1]),
                 all_day=all_day,
                 busy_status=status,
             )
