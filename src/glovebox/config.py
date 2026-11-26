@@ -47,7 +47,7 @@ class Settings:
     # account is `stale`; None turns the check off. A database stays readable when Messages
     # stops syncing, so silence is the only sign of it the gate can see.
     imessage_max_silence: timedelta | None = DEFAULT_IMESSAGE_MAX_SILENCE
-    # How long one read of the mailbox.org inbox may take, connecting to logout: a read that
+    # How long one read of the mailbox.org inbox may take, from start to logout: a read that
     # is not done by then is an outage. The whole window is read, so a large inbox needs more.
     mailbox_read_deadline: timedelta = DEFAULT_READ_DEADLINE
 
@@ -76,7 +76,8 @@ def parse_read_deadline(value: str | None) -> timedelta:
     if value is None or not value.strip():
         return DEFAULT_READ_DEADLINE
     text = value.strip()
-    seconds = int(text) if text.isascii() and text.isdigit() and len(text) <= 4 else 0
+    digits = len(str(MAX_READ_DEADLINE_SECONDS))
+    seconds = int(text) if text.isascii() and text.isdigit() and len(text) <= digits else 0
     if not 1 <= seconds <= MAX_READ_DEADLINE_SECONDS:
         raise ConfigError(
             f"{READ_DEADLINE_VAR} must be a whole number of seconds, "

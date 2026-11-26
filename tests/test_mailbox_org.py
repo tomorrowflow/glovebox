@@ -14,6 +14,7 @@ import json
 import ssl
 import subprocess
 import sys
+import threading
 import time
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
@@ -755,7 +756,18 @@ def test_the_whole_window_is_read_in_bounded_batches(monkeypatch: pytest.MonkeyP
     assert len(standin.fetches) == 4  # four commands of two messages, not one of eight
 
 
-def test_a_read_that_retries_message_by_message_still_keeps_to_its_time_limit() -> None:
+@pytest.fixture(params=["with the clock cutting the connection", "checks between commands only"])
+def clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The time limit with and without the watchdog that shuts the connection at the limit:
+    the checks the adapter makes itself must hold without it."""
+    if request.param.startswith("checks"):
+        monkeypatch.setattr(
+            imapmail.Budget, "enforce", lambda self, client: threading.Timer(0, int)
+        )
+    return str(request.param)
+
+
+def test_a_read_that_retries_message_by_message_still_keeps_to_its_time_limit(clock: str) -> None:
     mails = [mail(uid, f"s{uid}@example.test", "2026-01-05T09:00:00Z") for uid in range(1, 41)]
     mails[2] = dataclasses.replace(mails[2], structure=b"(((((")  # the batch cannot be parsed
     with imap_serving(mails) as standin:
@@ -767,11 +779,23 @@ def test_a_read_that_retries_message_by_message_still_keeps_to_its_time_limit() 
     assert len(standin.fetches) < 20
 
 
-def test_a_read_whose_last_command_outlasts_the_time_limit_is_an_error_not_a_success() -> None:
+def test_a_read_whose_last_command_outlasts_the_time_limit_is_an_error_not_a_success(
+    clock: str,
+) -> None:
     with imap_serving([mail(1, "a@example.test", "2026-01-05T09:00:00Z")]) as standin:
         standin.fetch_delay = 1.5
         with pytest.raises(imapmail.MailboxError):
             read_standin(standin, timedelta(seconds=1))
+
+
+def test_a_logout_that_stalls_is_cut_off_at_the_time_limit() -> None:
+    with imap_serving([mail(1, "a@example.test", "2026-01-05T09:00:00Z")]) as standin:
+        standin.fault = "logout_stall"
+        started = time.monotonic()
+        with pytest.raises(imapmail.MailboxError):
+            read_standin(standin, timedelta(seconds=1))
+
+    assert time.monotonic() - started < imapmail.CONNECT_TIMEOUT_SECONDS - 1  # not the socket's
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "soon", "1.5", "3601", "99999999999999999999"])
@@ -791,5 +815,4 @@ def test_a_bad_read_deadline_stops_the_service_from_starting(tmp_path: Path, val
 
     assert started.returncode == 1
     assert DEADLINE_VAR in started.stderr
-    if len(value) > 4:  # a short value is a substring of the message's own range
-        assert value not in started.stderr
+    assert value not in started.stderr.replace("1 to 3600", "")  # the message's own range

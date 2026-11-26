@@ -329,6 +329,9 @@ class Handler(socketserver.StreamRequestHandler):
             elif verb == "ID":
                 self.send(b"* ID NIL", b"%s OK done " % tag.encode() + NOISE)
             elif verb == "LOGOUT":
+                if standin.fault == "logout_stall":
+                    standin.released.wait(STALL_SECONDS)
+                    return
                 self.send(b"* BYE bye", b"%s OK done " % tag.encode() + NOISE)
                 return
             elif verb == "LOGIN":

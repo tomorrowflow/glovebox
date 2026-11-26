@@ -54,7 +54,7 @@ CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_READ_DEADLINE = timedelta(seconds=120)
 FETCH_ITEMS = ["FLAGS", "INTERNALDATE", "BODYSTRUCTURE", f"BODY.PEEK[]<0.{MAX_MESSAGE_BYTES}>"]
 BODY_KEY = b"BODY[]<0>"
-SEEN = b"\\seen"  # system flags are case-insensitive (RFC 9051, 2.3.2): compare lowercased
+SEEN_LOWER = b"\\seen"  # system flags are case-insensitive (RFC 9051, 2.3.2): compare lowercased
 # Parts that are no attachment: a signature is part of a signed message, not a file.
 SIGNATURE_SUBTYPES = frozenset({b"PGP-SIGNATURE", b"PKCS7-SIGNATURE", b"X-PKCS7-SIGNATURE"})
 ATTACHMENT = b"ATTACHMENT"
@@ -212,16 +212,19 @@ def read_inbox(
 
 
 def _read(location: Location, login: Login, since: datetime, budget: Budget) -> InboxRead:
+    budget.check()
     context = ssl.create_default_context() if location.tls else None
-    with IMAPClient(
+    # Connecting is bounded by the socket timeout alone: the clock needs a connection to cut.
+    client = IMAPClient(
         location.host,
         location.port,
         ssl=location.tls,
         ssl_context=context,
         timeout=CONNECT_TIMEOUT_SECONDS,
-    ) as client:
-        timer = budget.enforce(client)
-        try:
+    )
+    timer = budget.enforce(client)
+    try:
+        with client:  # logs out on the way out, still under the clock
             client.normalise_times = False  # keep the offset the server gave
             client.login(login.username, login.password.reveal())
             folder: dict[bytes, Any] = client.select_folder(FOLDER, readonly=True)
@@ -239,10 +242,11 @@ def _read(location: Location, login: Login, since: datetime, budget: Budget) -> 
                 )
                 messages.extend(batch)
                 skipped += unreadable
-            # A read that ran out of time on its last command is no success either.
-            budget.check()
-        finally:
-            timer.cancel()
+        # A read that ran out of time on its last command, or on the logout whose failure the
+        # client swallows, is no success either.
+        budget.check()
+    finally:
+        timer.cancel()
     return InboxRead(messages, skipped)
 
 
@@ -296,7 +300,7 @@ def _message(key: str, data: dict[bytes, Any]) -> InboxMessage | None:
             sender=sender,
             thread=_thread_of(parsed) or key,
             received=received.astimezone(UTC),
-            read=any(flag.lower() == SEEN for flag in data[b"FLAGS"]),
+            read=any(flag.lower() == SEEN_LOWER for flag in data[b"FLAGS"]),
             has_attachments=has_attachment(data[b"BODYSTRUCTURE"]),
             text=_text_of(parsed),
         )
