@@ -27,6 +27,7 @@ USER = "operator@mailbox.test"
 PASSWORD = "imap-secret-0123456789abcdef"
 FOLDER = "INBOX"
 UIDVALIDITY = 7001
+STALL_SECONDS = 60
 # Free text on every status line of the server: a client must never pass it on.
 NOISE = CORPUS["injection"].encode()
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -274,6 +275,8 @@ class ImapStandIn:
         self.commands: list[str] = []
         self.fetches: list[str] = []  # the data items of every fetch, as sent
         self.connections = 0
+        self.fetch_delay = 0.0  # seconds every fetch takes to be answered
+        self.released = threading.Event()  # set when the test is over: ends stalls at once
         self._lock = threading.Lock()
 
     @property
@@ -388,6 +391,20 @@ class Handler(socketserver.StreamRequestHandler):
         standin.fetches.append(" ".join(items))
         if standin.fault == "fetch_drop":
             return True
+        if standin.fault == "stall":
+            standin.released.wait(STALL_SECONDS)
+            return True
+        if standin.fault == "trickle":
+            # A response that never ends and never goes quiet: no socket timeout can fire.
+            try:
+                self.wfile.write(b"* 1 FETCH (UID 1 BODY[]<0> {1000000}\r\n")
+                while not standin.released.wait(0.2):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+            except OSError:
+                pass  # the client gave up on the connection
+            return True
+        standin.released.wait(standin.fetch_delay)
         if standin.fault == "fetch_no":
             self.send(b"%s NO %s" % (tag.encode(), CORPUS["tool_call"].encode()))
             return False
@@ -420,5 +437,6 @@ def imap_serving(mails: Sequence[Mail], **credentials: str) -> Iterator[ImapStan
     try:
         yield standin
     finally:
+        standin.released.set()
         server.shutdown()
         server.server_close()

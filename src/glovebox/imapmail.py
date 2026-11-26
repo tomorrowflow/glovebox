@@ -10,8 +10,8 @@ never read out of the message (ADR 0004). Nothing is copied: the mail is read wh
 
 Only four IMAP commands past login are ever sent: `EXAMINE`, `UID SEARCH`, `UID FETCH` with
 peeking items, and `LOGOUT`. That is gateway-enforced read-only: an IMAP login can also
-write, no read-only IMAP credential is known to exist at mailbox.org (docs/mailbox-org-mail.md), so
-the protection is that the gate has no code path that sends anything else (ADR 0003).
+write, mailbox.org documents no read-only credential for it (docs/mailbox-org-mail.md), so the
+protection is that the gate has no code path that sends anything else (ADR 0003).
 
 The IMAP library is IMAPClient. This module raises its own errors, with no detail on purpose:
 what a server or a message says stays out of exceptions, logs and responses.
@@ -20,6 +20,7 @@ what a server or a message says stays out of exceptions, logs and responses.
 import ipaddress
 import logging
 import ssl
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -42,19 +43,18 @@ logging.getLogger("imapclient").setLevel(logging.CRITICAL)
 FOLDER = "INBOX"
 DEFAULT_TLS_PORT = 993
 PLAIN_PORT = 143
-# The most messages one read returns. A window holding more is cut to the newest, and the
-# rest is reported as skipped, so that the account is `incomplete`, not `current`.
-MAX_MESSAGES = 2000
 # How much of each message is fetched: enough for the headers and the text the classifier
 # is shown, not the attachments.
 MAX_MESSAGE_BYTES = 64 * 1024
+# The whole window is read, this many messages to a command, so no one response is unbounded.
 BATCH_SIZE = 100
 CONNECT_TIMEOUT_SECONDS = 10
-# One read, connection to logout, is cut off after this long wherever the server stalls.
-READ_DEADLINE_SECONDS = 60
+# One read, from connecting to logout, is cut off after this long wherever the server stalls:
+# a read that has not finished by then is an outage, never a smaller success.
+DEFAULT_READ_DEADLINE = timedelta(seconds=120)
 FETCH_ITEMS = ["FLAGS", "INTERNALDATE", "BODYSTRUCTURE", f"BODY.PEEK[]<0.{MAX_MESSAGE_BYTES}>"]
 BODY_KEY = b"BODY[]<0>"
-SEEN = b"\\Seen"
+SEEN = b"\\seen"  # system flags are case-insensitive (RFC 9051, 2.3.2): compare lowercased
 # Parts that are no attachment: a signature is part of a signed message, not a file.
 SIGNATURE_SUBTYPES = frozenset({b"PGP-SIGNATURE", b"PKCS7-SIGNATURE", b"X-PKCS7-SIGNATURE"})
 ATTACHMENT = b"ATTACHMENT"
@@ -149,19 +149,61 @@ def login_of(secret: Secret) -> Login | None:
     return Login(lines[0].strip(), Secret(lines[1]))
 
 
-def read_inbox(location: Location, login: Login, since: datetime) -> InboxRead:
-    """The inbox's messages received on or after `since` (UTC), and possibly up to a day before it.
+class Budget:
+    """The time one read may take.
+
+    It is checked before every command, so retries and the end of the read count too, and it
+    is enforced during one: at the limit the connection is shut down, which ends a command
+    that is waiting on a server that stalls or trickles bytes, where no socket timeout would.
+    """
+
+    def __init__(self, limit: timedelta) -> None:
+        self._end = time.monotonic() + limit.total_seconds()
+        self._spent = threading.Event()
+
+    def check(self) -> None:
+        """Raises MailboxError once the limit has passed."""
+        if self._spent.is_set() or time.monotonic() > self._end:
+            raise MailboxError
+
+    def spent(self) -> bool:
+        return self._spent.is_set()
+
+    def enforce(self, client: IMAPClient) -> threading.Timer:
+        """Start the clock on `client`; the caller cancels it when the read is over."""
+        timer = threading.Timer(max(0.0, self._end - time.monotonic()), self._expire, [client])
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    def _expire(self, client: IMAPClient) -> None:
+        self._spent.set()
+        try:
+            client.shutdown()
+        except Exception:
+            pass  # already closed: the read has ended one way or the other
+
+
+def read_inbox(
+    location: Location,
+    login: Login,
+    since: datetime,
+    limit: timedelta = DEFAULT_READ_DEADLINE,
+) -> InboxRead:
+    """The whole inbox window: messages received on or after `since` (UTC), and possibly up
+    to a day before it.
 
     Raises MailboxBlocked if the server refuses the login and MailboxError for any other
-    failure.
+    failure, including a read that takes longer than `limit`.
     """
-    deadline = time.monotonic() + READ_DEADLINE_SECONDS
+    budget = Budget(limit)
     try:
-        return _read(location, login, since, deadline)
+        return _read(location, login, since, budget)
     except MailboxError:
         raise
     except LoginError:
-        raise MailboxBlocked from None
+        # A login cut off by the time limit is a stall, not a refusal.
+        raise (MailboxError if budget.spent() else MailboxBlocked) from None
     except Exception:
         # The edge of the library and of a server: a refused or dropped connection, a
         # timeout, a TLS failure, a response the library cannot parse, a structure that is
@@ -169,7 +211,7 @@ def read_inbox(location: Location, login: Login, since: datetime) -> InboxRead:
         raise MailboxError from None
 
 
-def _read(location: Location, login: Login, since: datetime, deadline: float) -> InboxRead:
+def _read(location: Location, login: Login, since: datetime, budget: Budget) -> InboxRead:
     context = ssl.create_default_context() if location.tls else None
     with IMAPClient(
         location.host,
@@ -178,44 +220,51 @@ def _read(location: Location, login: Login, since: datetime, deadline: float) ->
         ssl_context=context,
         timeout=CONNECT_TIMEOUT_SECONDS,
     ) as client:
-        client.normalise_times = False  # keep the offset the server gave
-        client.login(login.username, login.password.reveal())
-        folder: dict[bytes, Any] = client.select_folder(FOLDER, readonly=True)
-        validity = folder.get(b"UIDVALIDITY")
-        if not isinstance(validity, int):
-            raise MailboxError
-        # SINCE compares dates only, in the server's zone: start a day early, and let the
-        # gate drop what falls outside the window.
-        found: list[int] = sorted(client.search(["SINCE", since.date() - timedelta(days=1)]))
-        wanted = found[-MAX_MESSAGES:]
-        skipped = len(found) - len(wanted)
-        messages: list[InboxMessage] = []
-        for start in range(0, len(wanted), BATCH_SIZE):
-            if time.monotonic() > deadline:
+        timer = budget.enforce(client)
+        try:
+            client.normalise_times = False  # keep the offset the server gave
+            client.login(login.username, login.password.reveal())
+            folder: dict[bytes, Any] = client.select_folder(FOLDER, readonly=True)
+            validity = folder.get(b"UIDVALIDITY")
+            if not isinstance(validity, int):
                 raise MailboxError
-            batch, unreadable = _fetch(client, wanted[start : start + BATCH_SIZE], validity)
-            messages.extend(batch)
-            skipped += unreadable
+            # SINCE compares dates only, in the server's zone: start a day early, and let
+            # the gate drop what falls outside the window.
+            wanted: list[int] = sorted(client.search(["SINCE", since.date() - timedelta(days=1)]))
+            messages: list[InboxMessage] = []
+            skipped = 0
+            for start in range(0, len(wanted), BATCH_SIZE):
+                batch, unreadable = _fetch(
+                    client, wanted[start : start + BATCH_SIZE], validity, budget
+                )
+                messages.extend(batch)
+                skipped += unreadable
+            # A read that ran out of time on its last command is no success either.
+            budget.check()
+        finally:
+            timer.cancel()
     return InboxRead(messages, skipped)
 
 
 def _fetch(
-    client: IMAPClient, uids: Sequence[int], validity: int
+    client: IMAPClient, uids: Sequence[int], validity: int, budget: Budget
 ) -> tuple[list[InboxMessage], int]:
     """A batch of messages and the number that could not be understood.
 
     A response the library cannot parse is retried a message at a time, so that one
     malformed message costs one skip and not the batch.
     """
+    budget.check()
     try:
         response = client.fetch(uids, FETCH_ITEMS)
     except ProtocolError:
+        budget.check()  # a cut-off connection can look like a malformed response
         if len(uids) == 1:
             return [], 1
         found: list[InboxMessage] = []
         unreadable = 0
         for uid in uids:
-            one, skipped = _fetch(client, [uid], validity)
+            one, skipped = _fetch(client, [uid], validity, budget)
             found.extend(one)
             unreadable += skipped
         return found, unreadable
@@ -247,7 +296,7 @@ def _message(key: str, data: dict[bytes, Any]) -> InboxMessage | None:
             sender=sender,
             thread=_thread_of(parsed) or key,
             received=received.astimezone(UTC),
-            read=SEEN in data[b"FLAGS"],
+            read=any(flag.lower() == SEEN for flag in data[b"FLAGS"]),
             has_attachments=has_attachment(data[b"BODYSTRUCTURE"]),
             text=_text_of(parsed),
         )

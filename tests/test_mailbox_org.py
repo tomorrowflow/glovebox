@@ -13,8 +13,10 @@ import dataclasses
 import json
 import ssl
 import subprocess
+import sys
+import time
 from contextlib import AbstractContextManager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ from glovebox import imapmail
 from glovebox.access import Access
 from glovebox.credentials import Secret
 from tests.client import ACCOUNTS_TOOL, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent_client
-from tests.conftest import GateStarter, RunningGate, operator
+from tests.conftest import GateStarter, RunningGate, clean_environment, free_port, operator
 from tests.hostile import CORPUS, assert_no_corpus, observe_gate
 from tests.imap_standin import (
     FOLDER,
@@ -48,6 +50,7 @@ from tests.test_queries import call
 ACCOUNT = "mail"
 KIND = "mailbox_org_mail"
 FIRST_SYNC = "2026-01-10T12:00Z"
+DEADLINE_VAR = "GLOVEBOX_MAILBOX_READ_DEADLINE_SECONDS"
 LOGIN = f"{USER}\n{PASSWORD}\n"
 WINDOW_START = datetime(2025, 12, 11, 12, 0, tzinfo=UTC)
 
@@ -354,6 +357,9 @@ async def test_malformed_messages_are_skipped_and_counted_and_the_rest_is_served
         dataclasses.replace(mail(11, "x@example.test", when.isoformat()), internaldate=b'"nope"'),
         dataclasses.replace(mail(12, "y@example.test", when.isoformat()), structure=b'("TEXT")'),
         Mail(13, b"\xff\xfe\x00 not a message at all", text, when),
+        # The library cannot parse the response holding this one, so the batch is retried
+        # message by message and only this message is lost.
+        dataclasses.replace(mail(14, "z@example.test", when.isoformat()), structure=b"((((("),
     ]
     with imap_serving([*good[:2], *broken, *good[2:]]) as standin:
         with serving_gate(start_gate, tmp_path, standin) as gate:
@@ -364,8 +370,99 @@ async def test_malformed_messages_are_skipped_and_counted_and_the_rest_is_served
 
     assert len(listing["items"]) == 4
     entry = account_of(listing)
-    assert (entry["status"], entry["skipped_items"]) == ("incomplete", "4")
+    assert (entry["status"], entry["skipped_items"]) == ("incomplete", "5")
     assert (account_of(fixed)["status"], account_of(fixed)["skipped_items"]) == ("current", "0")
+
+
+@pytest.mark.anyio
+async def test_the_seen_flag_is_recognised_in_any_case_and_only_that_flag(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    kinds = [
+        ({"\\Seen"}, "read"),
+        ({"\\SEEN"}, "read"),
+        ({"\\seen", "$Junk"}, "read"),
+        ({"\\sEeN", "\\Answered"}, "read"),
+        (set(), "unread"),
+        ({"\\Answered"}, "unread"),
+        ({"Seen"}, "unread"),  # a keyword of the user's own, not the system flag
+    ]
+    mails = []
+    for index, (flags, _) in enumerate(kinds):
+        one = mail(index + 1, f"s{index}@example.test", f"2026-01-05T09:{index:02d}:00Z")
+        one.flags = set(flags)
+        mails.append(one)
+    with imap_serving(mails) as standin:
+        with serving_gate(start_gate, tmp_path, standin) as gate:
+            async with agent_client(gate) as client:
+                listing = await call(client, LIST_TOOL, sort="received_asc")
+                unread = await call(client, COUNT_TOOL, read_status="unread")
+
+    assert [item["read_status"] for item in listing["items"]] == [want for _, want in kinds]
+    assert unread["count"] == "3"
+
+
+@pytest.mark.anyio
+async def test_mail_beyond_any_page_of_the_window_stays_available_on_every_read(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    oldest = datetime(2025, 12, 20, tzinfo=UTC)
+    mails = []
+    for uid in range(1, 2101):
+        when = oldest + timedelta(minutes=uid - 1)
+        raw = f"From: s{uid}@example.test\r\nSubject: m{uid}\r\n\r\nbody\r\n".encode()
+        mails.append(Mail(uid, raw, b'("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1)', when))
+    classifier = tmp_path / "classifier.json"
+    classifier.write_text(json.dumps({"inference": {"backend": None}}))  # no text to classify
+    first_minutes = {"received_from": "2025-12-20T00:00Z", "received_to": "2025-12-20T00:49Z"}
+    last_minutes = {"received_from": "2025-12-21T10:50Z", "received_to": "2025-12-21T10:59Z"}
+    with imap_serving(mails) as standin:
+        env = {"GLOVEBOX_CLASSIFIER_CONFIG": str(classifier)}
+        with serving_gate(start_gate, tmp_path, standin, extra_env=env) as gate:
+            async with agent_client(gate) as client:
+                reads = [
+                    [
+                        await call(client, COUNT_TOOL),
+                        await call(client, COUNT_TOOL, **first_minutes),
+                        await call(client, COUNT_TOOL, **last_minutes),
+                    ]
+                    for _ in range(2)
+                ]
+
+    for total, first, last in reads:
+        # More than 2,000 messages in the window, the oldest ones as available as the newest.
+        assert (total["count"], first["count"], last["count"]) == ("1000+", "50", "10")
+        entry = account_of(total)
+        assert (entry["status"], entry["skipped_items"]) == ("current", "0")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fault", ["stall", "trickle"])
+async def test_a_read_that_outlasts_its_time_limit_is_an_outage_and_the_next_one_recovers(
+    start_gate: GateStarter, tmp_path: Path, fault: str
+) -> None:
+    with imap_serving(inbox()) as standin:
+        env = {DEADLINE_VAR: "2"}
+        with serving_gate(start_gate, tmp_path, standin, extra_env=env) as gate:
+            async with agent_client(gate) as client:
+                before = await call(client, LIST_TOOL)
+                standin.fault = fault
+                started = time.monotonic()
+                down = await call(client, LIST_TOOL)
+                counted = await call(client, COUNT_TOOL)
+                elapsed = time.monotonic() - started
+                standin.fault = None
+                after = await call(client, LIST_TOOL)
+            log = gate.log.read_text(errors="replace")
+
+    for result in (down, counted):
+        assert result["error"] == "source_unavailable"
+        entry = account_of(result)
+        assert (entry["status"], entry["last_sync"]) == ("stale", FIRST_SYNC)
+    assert down["items"] == [] and counted["count"] == "0"
+    assert elapsed < 20  # two reads at their 2-second limit, with a margin
+    assert after == before
+    assert_no_corpus({"down": json.dumps(down), "log": log})
 
 
 # --- the hostile corpus -----------------------------------------------------------------------
@@ -639,15 +736,60 @@ def test_a_part_counts_as_an_attachment_only_if_it_is_meant_as_a_file(name: str)
     assert imapmail.has_attachment(structure) is expected
 
 
-def test_more_mail_than_the_cap_is_cut_to_the_newest_and_reported_as_skipped(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(imapmail, "MAX_MESSAGES", 5)
+def read_standin(standin: ImapStandIn, limit: timedelta) -> imapmail.InboxRead:
+    """One read of the stand-in's window, straight through the adapter."""
+    location = imapmail.location_of(standin.url)
+    return imapmail.read_inbox(
+        location, imapmail.Login(USER, Secret(PASSWORD)), WINDOW_START, limit
+    )
+
+
+def test_the_whole_window_is_read_in_bounded_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(imapmail, "BATCH_SIZE", 2)
     mails = [mail(uid, f"s{uid}@example.test", "2026-01-05T09:00:00Z") for uid in range(1, 9)]
     with imap_serving(mails) as standin:
-        location = imapmail.location_of(standin.url)
-        found = imapmail.read_inbox(location, imapmail.Login(USER, Secret(PASSWORD)), WINDOW_START)
+        found = read_standin(standin, imapmail.DEFAULT_READ_DEADLINE)
 
-    assert sorted(message.key.split(":")[1] for message in found.messages) == list("45678")
-    assert found.skipped == 3
+    assert sorted(int(message.key.split(":")[1]) for message in found.messages) == list(range(1, 9))
+    assert found.skipped == 0
+    assert len(standin.fetches) == 4  # four commands of two messages, not one of eight
+
+
+def test_a_read_that_retries_message_by_message_still_keeps_to_its_time_limit() -> None:
+    mails = [mail(uid, f"s{uid}@example.test", "2026-01-05T09:00:00Z") for uid in range(1, 41)]
+    mails[2] = dataclasses.replace(mails[2], structure=b"(((((")  # the batch cannot be parsed
+    with imap_serving(mails) as standin:
+        standin.fetch_delay = 0.1
+        with pytest.raises(imapmail.MailboxError):
+            read_standin(standin, timedelta(seconds=1))
+
+    # Forty single fetches would take four seconds: the read stopped at its limit.
+    assert len(standin.fetches) < 20
+
+
+def test_a_read_whose_last_command_outlasts_the_time_limit_is_an_error_not_a_success() -> None:
+    with imap_serving([mail(1, "a@example.test", "2026-01-05T09:00:00Z")]) as standin:
+        standin.fetch_delay = 1.5
+        with pytest.raises(imapmail.MailboxError):
+            read_standin(standin, timedelta(seconds=1))
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "soon", "1.5", "3601", "99999999999999999999"])
+def test_a_bad_read_deadline_stops_the_service_from_starting(tmp_path: Path, value: str) -> None:
+    started = subprocess.run(
+        [sys.executable, "-m", "glovebox"],
+        env={
+            **clean_environment(tmp_path / "glovebox.db"),
+            "GLOVEBOX_PORT": str(free_port()),
+            DEADLINE_VAR: value,
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert started.returncode == 1
+    assert DEADLINE_VAR in started.stderr
+    if len(value) > 4:  # a short value is a substring of the message's own range
+        assert value not in started.stderr

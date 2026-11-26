@@ -300,16 +300,23 @@ class MailboxOrgMailSource:
 
     kind: SourceKind = MAILBOX_ORG_KIND
 
-    def __init__(self, source: str, credentials: Secret) -> None:
+    def __init__(
+        self,
+        source: str,
+        credentials: Secret,
+        deadline: timedelta = imapmail.DEFAULT_READ_DEADLINE,
+    ) -> None:
         self._source = source
         self._credentials = credentials
+        self._deadline = deadline
 
     def fetch(self, since: datetime, now: datetime) -> SourceMailbox:
         try:
             login = imapmail.login_of(self._credentials)
             if login is None:
                 raise SourceBlocked
-            found = imapmail.read_inbox(imapmail.location_of(self._source), login, since)
+            location = imapmail.location_of(self._source)
+            found = imapmail.read_inbox(location, login, since, self._deadline)
         except imapmail.MailboxBlocked:
             raise SourceBlocked from None
         except imapmail.MailboxError:
@@ -509,17 +516,19 @@ def open_source(
     location: str,
     credentials: Path | None,
     imessage_max_silence: timedelta | None = None,
+    mailbox_read_deadline: timedelta = imapmail.DEFAULT_READ_DEADLINE,
 ) -> ItemSource:
     """The adapter for one account, once its credentials file has passed the mode check.
 
-    `imessage_max_silence` is the setting of the iMessage source alone.
+    `imessage_max_silence` is the setting of the iMessage source alone, and
+    `mailbox_read_deadline` that of the mailbox.org source.
     Raises CredentialsError, which carries no detail, if the file cannot be used.
     """
     secret = read_credentials(credentials) if credentials is not None else None
     if kind == MAILBOX_ORG_KIND:
         if secret is None:
             raise SourceBlocked
-        return MailboxOrgMailSource(location, secret)
+        return MailboxOrgMailSource(location, secret, mailbox_read_deadline)
     adapter = FIXTURE_SOURCES.get(kind)
     if adapter is None:
         raise SourceError
