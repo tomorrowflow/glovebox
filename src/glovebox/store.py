@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 from glovebox import db
+from glovebox.availability import look_ahead_range
 from glovebox.calendars import BLOCKING_STATUSES, SourceCalendar, clip_to_look_ahead, look_ahead
 from glovebox.classification import UNKNOWN, Classification
 from glovebox.db import MINT_ATTEMPTS, new_handle
@@ -265,9 +266,10 @@ class Store:
                 (account, kind, status, minute(synced_at), skipped, coverage_end),
             )
 
-    def coverage_end(self, accounts: Sequence[str]) -> str | None:
+    def unknown_from(self, accounts: Sequence[str]) -> str | None:
         """The earliest minute from which the stored events of any of `accounts` are not
-        complete, or None if all of them are complete."""
+        complete, or None if all of them are complete. From there on, one account may hold
+        time that no stored event says it holds, whatever the others hold."""
         marks = ", ".join("?" for _ in accounts)
         with self._reader() as database:
             (earliest,) = database.execute(
@@ -468,23 +470,18 @@ def _event(row: Sequence[Any]) -> dict[str, Any]:
 def _event_where(
     accounts: Sequence[str], now: datetime, range_from: str | None, range_to: str | None
 ) -> tuple[str, list[object]]:
-    """The conditions that select events of `accounts` in the look-ahead, and in a range.
+    """The conditions that select the events of `accounts` that overlap a range.
 
-    As in `_where`, column names come from this module and every value is a parameter.
+    The range is cut to the look-ahead first, so no event is selected for time outside it, and
+    a range with no time left selects nothing. As in `_where`, column names come from this
+    module and every value is a parameter.
     """
-    start, end = (minute(moment) for moment in look_ahead(now))
+    start, end = look_ahead_range(now, range_from, range_to)
     marks = ", ".join("?" for _ in accounts)
     conditions = [f"account_handle in ({marks})", "end_time > ?", "start_time < ?"]
-    parameters: list[object] = [*accounts, start, end]
-    if range_from is not None and range_to is not None and range_from >= range_to:
-        conditions.append("0")  # a range that does not end after it starts selects nothing
-    if range_from is not None:
-        conditions.append("end_time > ?")
-        parameters.append(range_from)
-    if range_to is not None:
-        conditions.append("start_time < ?")
-        parameters.append(range_to)
-    return " and ".join(conditions), parameters
+    if start >= end:
+        conditions.append("0")
+    return " and ".join(conditions), [*accounts, start, end]
 
 
 def spell_count(count: int) -> str:

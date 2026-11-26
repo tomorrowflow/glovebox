@@ -1048,7 +1048,7 @@ async def test_a_standalone_event_cannot_take_the_identity_of_an_occurrence(
 
 
 @pytest.mark.anyio
-async def test_events_that_share_an_identity_but_disagree_are_counted_not_hidden(
+async def test_events_that_share_a_uid_but_disagree_all_hold_their_time(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:
     document = calendar(
@@ -1056,16 +1056,34 @@ async def test_events_that_share_an_identity_but_disagree_are_counted_not_hidden
         event("same", "2026-01-12T09:00:00Z", "2026-01-12T10:00:00Z"),
         event("twice", "2026-01-12T11:00:00Z", "2026-01-12T12:00:00Z"),
         event("twice", "2026-01-12T13:00:00Z", "2026-01-12T14:00:00Z"),
+        event("twice", "2026-01-12T15:00:00Z", "2026-01-12T16:00:00Z"),
     )
+    day = {"range_from": "2026-01-12T08:00Z", "range_to": "2026-01-12T17:00Z"}
     with publish(start_gate, tmp_path, document) as gate:
         async with agent_client(gate) as client:
             result = await call(client, EVENTS_TOOL)
+            windows = await windows_of(client, **day)
+            again = await events_of(client)
 
-    # A repeat of the same event is one event; a different event under the same identity
-    # cannot be told apart, so it is counted as one the gate could not keep.
-    assert [e["start"] for e in result["events"]] == ["2026-01-12T09:00Z", "2026-01-12T11:00Z"]
+    # A repeat of the same event is one event; a different event under the same UID is
+    # another, never dropped, so its time cannot be reported free.
+    starts = [e["start"] for e in result["events"]]
+    assert starts == [f"2026-01-12T{hour}:00Z" for hour in ("09", "11", "13", "15")]
+    assert len({e["event_handle"] for e in result["events"]}) == 4
+    assert again == result["events"]
+    assert [w[2] for w in windows] == [
+        "free",
+        "busy",
+        "free",
+        "busy",
+        "free",
+        "busy",
+        "free",
+        "busy",
+        "free",
+    ]
     (entry,) = result["accounts"]
-    assert (entry["status"], entry["skipped_items"]) == ("incomplete", "1")
+    assert (entry["status"], entry["skipped_items"]) == ("current", "0")
 
 
 @pytest.mark.anyio
@@ -1100,7 +1118,11 @@ async def test_events_dropped_by_the_storage_cap_leave_their_time_unknown_not_fr
         (at(timedelta(0)), at(4 * hour), "unknown"),
     ]
     assert last == [(at(5 * hour), LOOK_AHEAD_END, "unknown")]
-    assert whole["windows"][0]["state"] == "free"
+    assert whole["windows"][0] == {
+        "start": "2026-01-10T12:00Z",
+        "end": "2026-01-11T00:00Z",
+        "state": "free",
+    }
     assert len(listed["events"]) == 1
     (entry,) = listed["accounts"]
     assert (entry["status"], entry["skipped_items"]) == ("incomplete", "10+")

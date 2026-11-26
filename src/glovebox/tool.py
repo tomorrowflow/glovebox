@@ -461,11 +461,8 @@ class ReadTool:
             # Nothing of the range is inside the look-ahead, so nothing is selected.
             rows = []
         elif isinstance(request, EventsInput):
-            inside = request.only_filters().model_copy(
-                update={"range_from": start, "range_to": end}
-            )
             rows = self._store.list_events(
-                handles, now, inside, request.sort, wanted, paging.offset
+                handles, now, request.only_filters(), request.sort, wanted, paging.offset
             )
         else:
             blocking = self._store.blocking_events(handles, now, start, end)
@@ -474,7 +471,7 @@ class ReadTool:
                     [(event["start"], event["end"]) for event in blocking],
                     start,
                     end,
-                    self._store.coverage_end(handles),
+                    self._store.unknown_from(handles),
                 )
             else:
                 every = [dict(event) for event in overlapping(blocking)]

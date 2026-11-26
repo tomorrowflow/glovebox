@@ -15,7 +15,7 @@ event spans local midnights, and so is 23 or 25 hours long on the day of a chang
 
 import json
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from pathlib import Path
 from typing import Protocol
@@ -160,12 +160,25 @@ def parse_calendar(document: object, now: datetime) -> SourceCalendar:
             skipped += 1
             continue
         for event in parsed:
-            kept = found.setdefault(event.upstream_id, event)
-            if kept != event:
-                # A different event under the same identity would share its handle, so only
-                # one can be kept; the account says it is missing something.
-                skipped += 1
+            distinct = _distinct(found, event)
+            found.setdefault(distinct.upstream_id, distinct)
     return SourceCalendar(events=list(found.values()), skipped=skipped)
+
+
+def _distinct(found: Mapping[str, SourceEvent], event: SourceEvent) -> SourceEvent:
+    """The event under an identity of its own.
+
+    A repeat of an event found already keeps that one's identity. A different event under
+    the same UID gets the next free one, so that no event that holds time is dropped and
+    each has a handle of its own.
+    """
+    candidate, number = event, 1
+    while (kept := found.get(candidate.upstream_id)) is not None:
+        if replace(kept, upstream_id=event.upstream_id) == event:
+            break
+        number += 1
+        candidate = replace(event, upstream_id=json.dumps([event.upstream_id, number]))
+    return candidate
 
 
 def _identity(uid: str, day: date | None) -> str:
