@@ -212,9 +212,11 @@ SPECS: dict[str, ToolSpec] = {
         _definition(
             AVAILABILITY_TOOL,
             "Lists when the calendar owner is busy and when free in a time range, across the "
-            "calendar accounts: consecutive windows that cover the range, each busy or free, "
-            "earliest first, with events that run into each other or touch making one busy "
-            f"window. {CALENDAR_TEXT}",
+            "calendar accounts: consecutive windows that cover the range, each busy, free or "
+            "unknown, earliest first, with events that run into each other or touch making one "
+            "busy window. A window is unknown where the gate holds only some of an account's "
+            "events (the account is incomplete) and no known event holds the time: it is never "
+            f"reported free. {CALENDAR_TEXT}",
             RangeInput,
             AvailabilityOutput,
         ),
@@ -452,19 +454,29 @@ class ReadTool:
         """One page of what a calendar tool answers, as stored, and the cursor of the next."""
         # One row past the page tells whether there is a next one.
         wanted = request.limit + 1
-        if isinstance(request, EventsInput):
-            key = "events"
+        key = "windows" if name == AVAILABILITY_TOOL else "events"
+        start, end = look_ahead_range(now, request.range_from, request.range_to)
+        rows: Sequence[Mapping[str, Any]]
+        if start >= end:
+            # Nothing of the range is inside the look-ahead, so nothing is selected.
+            rows = []
+        elif isinstance(request, EventsInput):
+            inside = request.only_filters().model_copy(
+                update={"range_from": start, "range_to": end}
+            )
             rows = self._store.list_events(
-                handles, now, request.only_filters(), request.sort, wanted, paging.offset
+                handles, now, inside, request.sort, wanted, paging.offset
             )
         else:
-            start, end = look_ahead_range(now, request.range_from, request.range_to)
             blocking = self._store.blocking_events(handles, now, start, end)
-            if name == AVAILABILITY_TOOL:
-                key = "windows"
-                every = windows([(event["start"], event["end"]) for event in blocking], start, end)
+            if key == "windows":
+                every = windows(
+                    [(event["start"], event["end"]) for event in blocking],
+                    start,
+                    end,
+                    self._store.coverage_end(handles),
+                )
             else:
-                key = "events"
                 every = [dict(event) for event in overlapping(blocking)]
             rows = every[paging.offset : paging.offset + wanted]
         page = rows[: request.limit]

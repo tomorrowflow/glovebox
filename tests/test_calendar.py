@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from mcp import Client
 
+from glovebox.formats import MAX_EVENTS
 from tests.client import (
     ACCOUNTS_TOOL,
     AVAILABILITY_TOOL,
@@ -1003,6 +1004,145 @@ async def test_a_document_that_is_not_a_calendar_is_an_outage(
             async with agent_client(gate) as client:
                 result = await call(client, EVENTS_TOOL)
         assert result["error"] == "source_unavailable", document
+
+
+# --- identity, coverage and empty ranges ------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_a_standalone_event_cannot_take_the_identity_of_an_occurrence(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    series = event(
+        "series",
+        "2026-01-13T09:00:00Z",
+        "2026-01-13T10:00:00Z",
+        recurrence={"freq": "daily", "count": 2},
+    )
+    # A UID that spells the series UID, a separator and the day of its first occurrence.
+    lookalike = event("series\x002026-01-13", "2026-01-13T14:00:00Z", "2026-01-13T15:00:00Z")
+    day = {"range_from": "2026-01-13T08:00Z", "range_to": "2026-01-13T16:00Z"}
+    with publish(start_gate, tmp_path, calendar(series, lookalike)) as gate:
+        async with agent_client(gate) as client:
+            first = await events_of(client)
+            again = await events_of(client)
+            windows = await windows_of(client, **day)
+    with publish(start_gate, tmp_path, calendar(series, lookalike)) as restarted:
+        async with agent_client(restarted) as client:
+            after_restart = await events_of(client)
+
+    assert [e["start"] for e in first] == [
+        "2026-01-13T09:00Z",
+        "2026-01-13T14:00Z",
+        "2026-01-14T09:00Z",
+    ]
+    assert len({e["event_handle"] for e in first}) == 3
+    assert first == again == after_restart
+    assert windows == [
+        ("2026-01-13T08:00Z", "2026-01-13T09:00Z", "free"),
+        ("2026-01-13T09:00Z", "2026-01-13T10:00Z", "busy"),
+        ("2026-01-13T10:00Z", "2026-01-13T14:00Z", "free"),
+        ("2026-01-13T14:00Z", "2026-01-13T15:00Z", "busy"),
+        ("2026-01-13T15:00Z", "2026-01-13T16:00Z", "free"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_events_that_share_an_identity_but_disagree_are_counted_not_hidden(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    document = calendar(
+        event("same", "2026-01-12T09:00:00Z", "2026-01-12T10:00:00Z"),
+        event("same", "2026-01-12T09:00:00Z", "2026-01-12T10:00:00Z"),
+        event("twice", "2026-01-12T11:00:00Z", "2026-01-12T12:00:00Z"),
+        event("twice", "2026-01-12T13:00:00Z", "2026-01-12T14:00:00Z"),
+    )
+    with publish(start_gate, tmp_path, document) as gate:
+        async with agent_client(gate) as client:
+            result = await call(client, EVENTS_TOOL)
+
+    # A repeat of the same event is one event; a different event under the same identity
+    # cannot be told apart, so it is counted as one the gate could not keep.
+    assert [e["start"] for e in result["events"]] == ["2026-01-12T09:00Z", "2026-01-12T11:00Z"]
+    (entry,) = result["accounts"]
+    assert (entry["status"], entry["skipped_items"]) == ("incomplete", "1")
+
+
+@pytest.mark.anyio
+async def test_events_dropped_by_the_storage_cap_leave_their_time_unknown_not_free(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    first_day = datetime(2026, 1, 11)
+    events = [
+        timed(f"e{index}", first_day, timedelta(hours=index), timedelta(minutes=30))
+        for index in range(MAX_EVENTS + 100)
+    ]
+    cutoff = first_day + timedelta(hours=MAX_EVENTS)  # where the first dropped event starts
+
+    def at(offset: timedelta) -> str:
+        return (cutoff + offset).strftime("%Y-%m-%dT%H:%MZ")
+
+    hour, half = timedelta(hours=1), timedelta(minutes=30)
+    with publish(start_gate, tmp_path, calendar(*events)) as gate:
+        async with agent_client(gate) as client:
+            windows = await windows_of(client, range_from=at(-2 * hour), range_to=at(4 * hour))
+            whole = await call(client, AVAILABILITY_TOOL, limit=50)
+            last = await windows_of(client, range_from=at(5 * hour), range_to=LOOK_AHEAD_END)
+            listed = await call(client, EVENTS_TOOL, range_from=at(-hour), range_to=at(4 * hour))
+
+    # The kept events are served as they are; from where the first one was dropped, the
+    # source is not known to be free.
+    assert windows == [
+        (at(-2 * hour), at(-2 * hour + half), "busy"),
+        (at(-2 * hour + half), at(-hour), "free"),
+        (at(-hour), at(-hour + half), "busy"),
+        (at(-hour + half), at(timedelta(0)), "free"),
+        (at(timedelta(0)), at(4 * hour), "unknown"),
+    ]
+    assert last == [(at(5 * hour), LOOK_AHEAD_END, "unknown")]
+    assert whole["windows"][0]["state"] == "free"
+    assert len(listed["events"]) == 1
+    (entry,) = listed["accounts"]
+    assert (entry["status"], entry["skipped_items"]) == ("incomplete", "10+")
+
+
+@pytest.mark.anyio
+async def test_a_range_with_no_time_inside_the_look_ahead_selects_nothing_from_any_tool(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    # Two events that overlap each other and are running when the gate's clock is 12:00.
+    document = calendar(
+        event("a", "2026-01-10T11:00:00Z", "2026-01-10T13:00:00Z"),
+        event("b", "2026-01-10T11:30:00Z", "2026-01-10T13:30:00Z"),
+        event("c", "2026-04-10T11:00:00Z", "2026-04-10T13:00:00Z"),
+    )
+    empty_ranges: list[dict[str, str]] = [
+        {"range_from": "2025-01-01T00:00Z", "range_to": "2026-01-10T11:45Z"},
+        {"range_to": "2026-01-10T11:45Z"},
+        {"range_from": "2026-01-10T12:00Z", "range_to": "2026-01-10T12:00Z"},
+        {"range_from": "2026-01-11T00:00Z", "range_to": "2026-01-10T00:00Z"},
+        {"range_from": "2026-04-10T12:00Z", "range_to": "2026-06-01T00:00Z"},
+        {"range_from": "2026-04-10T12:00Z"},
+    ]
+    with publish(start_gate, tmp_path, document) as gate:
+        async with agent_client(gate) as client:
+            answers = {
+                (tool, json.dumps(arguments)): await call(client, tool, **arguments)
+                for tool in CALENDAR_TOOLS
+                for arguments in empty_ranges
+            }
+            running_events = await events_of(client, range_to="2026-01-10T12:30Z")
+            running_overlaps = await spans_of(client, OVERLAPS_TOOL, range_to="2026-01-10T12:30Z")
+
+    for key, answer in answers.items():
+        assert answer["error"] == "none", key
+        assert not answer.get("events") and not answer.get("windows"), key
+    # The same events are served for a range that does include the present.
+    assert len(running_events) == 2
+    assert running_overlaps == [
+        "2026-01-10T11:00Z/2026-01-10T13:00Z",
+        "2026-01-10T11:30Z/2026-01-10T13:30Z",
+    ]
 
 
 # --- retention, handles and the hostile corpus ------------------------------------------

@@ -83,7 +83,8 @@ create table if not exists sync_state (
     source_kind text not null,
     status text not null,
     last_sync text not null,
-    skipped integer not null default 0
+    skipped integer not null default 0,
+    coverage_end text not null default ''
 );
 """
 
@@ -104,6 +105,10 @@ def prepare(path: Path) -> None:
         columns = {row[1] for row in database.execute("pragma table_info(sync_state)")}
         if "skipped" not in columns:
             database.execute("alter table sync_state add column skipped integer not null default 0")
+        if "coverage_end" not in columns:
+            database.execute(
+                "alter table sync_state add column coverage_end text not null default ''"
+            )
 
 
 def _drop_items_without_semantic_fields(database: sqlite3.Connection) -> None:

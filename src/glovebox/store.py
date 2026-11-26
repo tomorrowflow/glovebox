@@ -41,6 +41,9 @@ from glovebox.sources import READ_ONLY_ENFORCEMENT, SourceItem, SourceMailbox, S
 # cannot be null, and no minute is ever empty.
 NEVER_SYNCED = ""
 
+# What `sync_state.coverage_end` holds for a calendar account whose stored events are all it has.
+FULL_COVERAGE = ""
+
 # The fixed sort orders, each ending in the item handle so that a page boundary is stable.
 SORT_ORDERS: dict[SortOrder, str] = {
     "received_desc": "received desc, item_handle",
@@ -217,9 +220,10 @@ class Store:
 
         Events outside the look-ahead at `synced_at` are not ingested, and one that runs past
         its end is stored cut there. At most MAX_EVENTS are kept, the earliest first; the
-        rest count as skipped. The account is current, or incomplete if the source held
-        events that could not be understood. An account the operator removed in the meantime
-        is not written to.
+        rest count as skipped, and the start of the first one left out is recorded as where
+        the account's coverage ends, so that time from then on is never reported as free.
+        The account is current, or incomplete if the source held events that could not be
+        understood or kept. An account the operator removed in the meantime is not written to.
         """
         window_start, _ = look_ahead(synced_at)
         with self._transaction() as database:
@@ -231,12 +235,15 @@ class Store:
             database.execute("delete from events where end_time <= ?", (minute(window_start),))
             skipped = calendar.skipped
             kept = 0
+            coverage_end = FULL_COVERAGE
             for event in sorted(calendar.events, key=lambda e: (e.start, e.upstream_id)):
                 served = clip_to_look_ahead(event.start, event.end, synced_at)
                 if served is None:
                     continue
                 if kept == MAX_EVENTS:
                     skipped += 1
+                    if coverage_end == FULL_COVERAGE:
+                        coverage_end = minute(served[0])
                     continue
                 kept += 1
                 database.execute(
@@ -253,10 +260,22 @@ class Store:
             status: SyncStatus = "incomplete" if skipped else "current"
             database.execute(
                 "insert or replace into sync_state"
-                " (account_handle, source_kind, status, last_sync, skipped)"
-                " values (?, ?, ?, ?, ?)",
-                (account, kind, status, minute(synced_at), skipped),
+                " (account_handle, source_kind, status, last_sync, skipped, coverage_end)"
+                " values (?, ?, ?, ?, ?, ?)",
+                (account, kind, status, minute(synced_at), skipped, coverage_end),
             )
+
+    def coverage_end(self, accounts: Sequence[str]) -> str | None:
+        """The earliest minute from which the stored events of any of `accounts` are not
+        complete, or None if all of them are complete."""
+        marks = ", ".join("?" for _ in accounts)
+        with self._reader() as database:
+            (earliest,) = database.execute(
+                "select min(coverage_end) from sync_state where coverage_end != ?"
+                f" and account_handle in ({marks})",
+                (FULL_COVERAGE, *accounts),
+            ).fetchone()
+        return None if earliest is None else str(earliest)
 
     def mark_unsynced(self, account: str, kind: str, status: SyncStatus) -> None:
         """Record that the last sync of the account failed.

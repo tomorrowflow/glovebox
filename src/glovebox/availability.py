@@ -25,10 +25,16 @@ def look_ahead_range(
     return max(range_from or first, first), min(range_to or last, last)
 
 
-def windows(blocking: Iterable[tuple[str, str]], start: str, end: str) -> list[dict[str, str]]:
+def windows(
+    blocking: Iterable[tuple[str, str]], start: str, end: str, unknown_from: str | None
+) -> list[dict[str, str]]:
     """The range from `start` to `end` split into busy windows, where any of the `blocking`
     intervals is, and free windows between them; events that run into each other or touch
-    make one busy window."""
+    make one busy window.
+
+    From `unknown_from` on, if there is one, the events are not all known, so the time no
+    known event holds is `unknown` there and not `free`.
+    """
     merged: list[tuple[str, str]] = []
     for begin, finish in sorted(blocking):
         begin, finish = max(begin, start), min(finish, end)
@@ -41,13 +47,25 @@ def windows(blocking: Iterable[tuple[str, str]], start: str, end: str) -> list[d
     result: list[dict[str, str]] = []
     reached = start
     for begin, finish in merged:
-        if reached < begin:
-            result.append({"start": reached, "end": begin, "state": "free"})
+        result += _unheld(reached, begin, unknown_from)
         result.append({"start": begin, "end": finish, "state": "busy"})
         reached = finish
-    if reached < end:
-        result.append({"start": reached, "end": end, "state": "free"})
-    return result
+    return result + _unheld(reached, end, unknown_from)
+
+
+def _unheld(start: str, end: str, unknown_from: str | None) -> list[dict[str, str]]:
+    """The time from `start` to `end` that no known event holds: free where all events are
+    known, unknown from `unknown_from` on."""
+    if start >= end:
+        return []
+    if unknown_from is None or unknown_from >= end:
+        return [{"start": start, "end": end, "state": "free"}]
+    if unknown_from <= start:
+        return [{"start": start, "end": end, "state": "unknown"}]
+    return [
+        {"start": start, "end": unknown_from, "state": "free"},
+        {"start": unknown_from, "end": end, "state": "unknown"},
+    ]
 
 
 def overlapping(events: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:

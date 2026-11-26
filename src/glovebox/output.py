@@ -143,13 +143,14 @@ class EventsOutput(ReadOutput):
 
 
 class Window(BaseModel):
-    """A stretch of time, all of it busy or all of it free."""
+    """A stretch of time, all of it busy, all of it free, or all of it unknown: the gate holds
+    only some of the events from there on, so it cannot say the time is free."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     start: Minute
     end: Minute
-    state: Literal["busy", "free"]
+    state: Literal["busy", "free", "unknown"]
 
 
 class AvailabilityOutput(ReadOutput):

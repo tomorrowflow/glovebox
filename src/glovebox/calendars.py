@@ -13,6 +13,7 @@ in the event's time zone, and so moves in UTC across a daylight-saving change; a
 event spans local midnights, and so is 23 or 25 hours long on the day of a change.
 """
 
+import json
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
@@ -63,7 +64,7 @@ class SourceEvent:
     """One occurrence of an event as the gate keeps it: the upstream key and the values that
     map to permitted fields."""
 
-    upstream_id: str  # for an occurrence of a recurring event, the series UID and the day
+    upstream_id: str  # the UID, and for an occurrence of a recurring event the day too
     start: datetime  # UTC, truncated to the minute
     end: datetime
     all_day: bool
@@ -159,8 +160,21 @@ def parse_calendar(document: object, now: datetime) -> SourceCalendar:
             skipped += 1
             continue
         for event in parsed:
-            found.setdefault(event.upstream_id, event)
+            kept = found.setdefault(event.upstream_id, event)
+            if kept != event:
+                # A different event under the same identity would share its handle, so only
+                # one can be kept; the account says it is missing something.
+                skipped += 1
     return SourceCalendar(events=list(found.values()), skipped=skipped)
+
+
+def _identity(uid: str, day: date | None) -> str:
+    """The key of an event or, for a recurring one, of its occurrence on `day`.
+
+    A list of strings in JSON has one spelling and reads back one way, so a UID can never
+    pass for the UID of another event plus a day.
+    """
+    return json.dumps([uid] if day is None else [uid, day.isoformat()])
 
 
 def _parse_event(raw: object, default_zone: tzinfo, now: datetime) -> list[SourceEvent] | None:
@@ -204,7 +218,7 @@ def _occurrences_of(raw: object, default_zone: tzinfo, now: datetime) -> list[So
             continue
         events.append(
             SourceEvent(
-                upstream_id=uid if rule is None else f"{uid}\0{day.isoformat()}",
+                upstream_id=_identity(uid, None if rule is None else day),
                 start=_minute(served[0]),
                 end=_minute(served[1]),
                 all_day=all_day,
