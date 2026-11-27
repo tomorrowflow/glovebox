@@ -14,7 +14,6 @@ import json
 import ssl
 import subprocess
 import sys
-import threading
 import time
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
@@ -42,6 +41,7 @@ from tests.imap_standin import (
     hostile_inbox,
     imap_serving,
     mail,
+    self_signed_certificate,
 )
 from tests.test_classifier import GOOD, GOOD_SERVED, Setup
 from tests.test_failures import account_of
@@ -438,7 +438,7 @@ async def test_mail_beyond_any_page_of_the_window_stays_available_on_every_read(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("fault", ["stall", "trickle"])
+@pytest.mark.parametrize("fault", ["stall", "trickle", "greeting_stall", "greeting_trickle"])
 async def test_a_read_that_outlasts_its_time_limit_is_an_outage_and_the_next_one_recovers(
     start_gate: GateStarter, tmp_path: Path, fault: str
 ) -> None:
@@ -609,28 +609,49 @@ async def test_an_account_whose_setup_changed_is_blocked_and_nothing_is_sent(
 
 
 class RecordingClient:
-    """Stands in for IMAPClient to see how it is asked to connect; it never connects."""
+    """Stands in for the adapter's IMAP client to see how it is asked to connect; it never
+    connects."""
 
-    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    calls: list[tuple[imapmail.Location, ssl.SSLContext | None]] = []
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.calls.append((args, kwargs))
+    def __init__(
+        self, location: imapmail.Location, context: ssl.SSLContext | None, budget: object
+    ) -> None:
+        self.calls.append((location, context))
         raise OSError
 
 
 def test_the_login_is_sent_only_over_verified_tls_beyond_this_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(imapmail, "IMAPClient", RecordingClient)
+    monkeypatch.setattr(imapmail, "MailClient", RecordingClient)
     login = imapmail.Login(USER, Secret(PASSWORD))
     with pytest.raises(imapmail.MailboxError):
         imapmail.read_inbox(imapmail.location_of("imaps://imap.mailbox.org"), login, WINDOW_START)
 
-    ((args, kwargs),) = RecordingClient.calls
-    assert args == ("imap.mailbox.org", 993)
-    context = kwargs["ssl_context"]
-    assert kwargs["ssl"] is True
+    ((location, context),) = RecordingClient.calls
+    assert location == imapmail.Location("imap.mailbox.org", 993, True)
+    assert context is not None
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+
+
+def test_a_read_over_tls_checks_the_servers_certificate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real TLS handshake against the stand-in: the clock-watched connection still reads the
+    inbox when the certificate is trusted, and refuses a server it cannot verify."""
+    certificate = self_signed_certificate(tmp_path)
+    login = imapmail.Login(USER, Secret(PASSWORD))
+    with imap_serving(inbox(), certificate) as standin:
+        location = imapmail.location_of(standin.url)
+        assert location.tls
+        with pytest.raises(imapmail.MailboxError):  # nobody vouches for this certificate
+            imapmail.read_inbox(location, login, WINDOW_START)
+        monkeypatch.setenv("SSL_CERT_FILE", str(certificate[0]))  # now the default store has it
+        found = imapmail.read_inbox(location, login, WINDOW_START)
+
+    assert len(found.messages) == 5 and found.skipped == 0
+    assert set(standin.commands) <= READ_COMMANDS
 
 
 @pytest.mark.parametrize(
@@ -761,10 +782,31 @@ def clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> st
     """The time limit with and without the watchdog that shuts the connection at the limit:
     the checks the adapter makes itself must hold without it."""
     if request.param.startswith("checks"):
-        monkeypatch.setattr(
-            imapmail.Budget, "enforce", lambda self, client: threading.Timer(0, int)
-        )
+        monkeypatch.setattr(imapmail.Budget, "start", lambda self: None)
     return str(request.param)
+
+
+@pytest.mark.parametrize(
+    ("fault", "scheme"),
+    [("greeting_stall", "imap"), ("greeting_trickle", "imap"), ("greeting_stall", "imaps")],
+    ids=["stalled greeting", "trickled greeting", "stalled TLS handshake"],
+)
+def test_a_connection_that_never_gets_set_up_is_cut_off_at_the_time_limit(
+    fault: str, scheme: str
+) -> None:
+    """Setting up the connection (the greeting, or the TLS handshake of `imaps`) is under the
+    same clock as the rest of the read: no socket timeout is what ends it."""
+    with imap_serving(inbox()) as standin:
+        standin.fault = fault
+        location = imapmail.location_of(f"{scheme}://127.0.0.1:{standin.port}")
+        started = time.monotonic()
+        with pytest.raises(imapmail.MailboxError):
+            imapmail.read_inbox(
+                location, imapmail.Login(USER, Secret(PASSWORD)), WINDOW_START, timedelta(seconds=1)
+            )
+
+    assert time.monotonic() - started < imapmail.CONNECT_TIMEOUT_SECONDS - 4
+    assert standin.commands == []  # nothing was sent after the greeting that never came
 
 
 def test_a_read_that_retries_message_by_message_still_keeps_to_its_time_limit(clock: str) -> None:

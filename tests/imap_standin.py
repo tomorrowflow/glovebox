@@ -11,15 +11,23 @@ Faults are set one at a time with `fault`.
 
 import re
 import socketserver
+import ssl
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email import policy
 from email.message import EmailMessage, Message
 from email.utils import formataddr
+from ipaddress import ip_address
+from pathlib import Path
 from typing import Any, cast
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from tests.hostile import CORPUS
 
@@ -272,6 +280,7 @@ class ImapStandIn:
         self.password = password
         self.fault: str | None = None
         self.port = 0
+        self.scheme = "imap"
         self.commands: list[str] = []
         self.fetches: list[str] = []  # the data items of every fetch, as sent
         self.connections = 0
@@ -281,7 +290,7 @@ class ImapStandIn:
 
     @property
     def url(self) -> str:
-        return f"imap://127.0.0.1:{self.port}"
+        return f"{self.scheme}://127.0.0.1:{self.port}"
 
     def flags(self) -> dict[int, set[str]]:
         return {m.uid: set(m.flags) for m in self.mails}
@@ -302,6 +311,20 @@ class Handler(socketserver.StreamRequestHandler):
         standin: ImapStandIn = self.server.standin
         standin.connections += 1
         if standin.fault == "down":
+            return
+        if standin.fault == "greeting_stall":
+            # Accepts the connection and says nothing: neither a greeting nor, to a client
+            # that speaks TLS first, a handshake.
+            standin.released.wait(STALL_SECONDS)
+            return
+        if standin.fault == "greeting_trickle":
+            # A greeting that never ends and never goes quiet: no socket timeout can fire.
+            try:
+                while not standin.released.wait(0.2):
+                    self.wfile.write(b"*")
+                    self.wfile.flush()
+            except OSError:
+                pass  # the client gave up on the connection
             return
         if standin.fault == "bye":
             self.send(b"* BYE " + CORPUS["injection"].encode())
@@ -425,13 +448,61 @@ class Handler(socketserver.StreamRequestHandler):
         return False
 
 
+def self_signed_certificate(directory: Path) -> tuple[Path, Path]:
+    """A certificate for 127.0.0.1 and its private key, as PEM files in `directory`."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ip_address("127.0.0.1"))]), False
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = directory / "standin.pem", directory / "standin.key"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return cert_path, key_path
+
+
 @contextmanager
-def imap_serving(mails: Sequence[Mail], **credentials: str) -> Iterator[ImapStandIn]:
+def imap_serving(
+    mails: Sequence[Mail], certificate: tuple[Path, Path] | None = None, **credentials: str
+) -> Iterator[ImapStandIn]:
+    """The stand-in on a free loopback port; with a `certificate` (certificate file, key file)
+    it speaks TLS from the first byte, as an `imaps` server does."""
     standin = ImapStandIn(mails, **credentials)
+    context = None
+    if certificate is not None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(*certificate)
+        standin.scheme = "imaps"
 
     class Server(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
         daemon_threads = True
+
+        def get_request(self) -> tuple[Any, Any]:
+            connection, address = super().get_request()
+            if context is not None:
+                # The handshake happens in the handler's thread, at its first read or write.
+                connection = context.wrap_socket(
+                    connection, server_side=True, do_handshake_on_connect=False
+                )
+            return connection, address
 
     server = Server(("127.0.0.1", 0), Handler)
     cast(Any, server).standin = standin

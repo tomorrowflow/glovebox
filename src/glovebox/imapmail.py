@@ -17,8 +17,10 @@ The IMAP library is IMAPClient. This module raises its own errors, with no detai
 what a server or a message says stays out of exceptions, logs and responses.
 """
 
+import imaplib
 import ipaddress
 import logging
+import socket
 import ssl
 import threading
 import time
@@ -150,16 +152,31 @@ def login_of(secret: Secret) -> Login | None:
 
 
 class Budget:
-    """The time one read may take.
+    """The time one read may take, from connecting to the end of the logout.
 
-    It is checked before every command, so retries and the end of the read count too, and it
-    is enforced during one: at the limit the connection is shut down, which ends a command
-    that is waiting on a server that stalls or trickles bytes, where no socket timeout would.
+    It is checked before every command, so retries and the end of the read count too. And it
+    is enforced during one: every socket the read opens is watched from the moment it exists,
+    and at the limit it is shut down, which ends a connect, a TLS handshake, a greeting or a
+    command that waits on a server that stalls or trickles bytes, where no socket timeout
+    would. What no clock can cut is the name lookup before the first socket exists.
     """
 
     def __init__(self, limit: timedelta) -> None:
         self._end = time.monotonic() + limit.total_seconds()
         self._spent = threading.Event()
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self._timer: threading.Timer | None = None
+
+    def start(self) -> None:
+        """Start the clock; `stop` ends it when the read is over."""
+        self._timer = threading.Timer(max(0.0, self._end - time.monotonic()), self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def stop(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
 
     def check(self) -> None:
         """Raises MailboxError once the limit has passed."""
@@ -169,19 +186,74 @@ class Budget:
     def spent(self) -> bool:
         return self._spent.is_set()
 
-    def enforce(self, client: IMAPClient) -> threading.Timer:
-        """Start the clock on `client`; the caller cancels it when the read is over."""
-        timer = threading.Timer(max(0.0, self._end - time.monotonic()), self._expire, [client])
-        timer.daemon = True
-        timer.start()
-        return timer
+    def remaining(self, cap: float) -> float:
+        """The seconds left, at most `cap`: a step that must not outlast the read."""
+        self.check()
+        return min(cap, self._end - time.monotonic())
 
-    def _expire(self, client: IMAPClient) -> None:
-        self._spent.set()
-        try:
-            client.shutdown()
-        except Exception:
-            pass  # already closed: the read has ended one way or the other
+    def watch(self, connection: socket.socket) -> None:
+        """Put a socket under the clock. Raises MailboxError if the limit has passed."""
+        with self._lock:
+            self.check()
+            self._sockets.append(connection)
+
+    def _expire(self) -> None:
+        with self._lock:
+            self._spent.set()
+            watched = list(self._sockets)
+        for connection in watched:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # already closed: the read has ended one way or the other
+
+
+class Connection(imaplib.IMAP4):
+    """The connection of one read, plain or TLS, whose socket is put under the read's clock
+    as soon as it is open and before the TLS handshake and the greeting, which a server can
+    stall or trickle like any other answer."""
+
+    def __init__(self, host: str, port: int, context: ssl.SSLContext | None, budget: Budget):
+        self._context = context
+        self._budget = budget
+        super().__init__(host, port)
+
+    def _create_socket(self, timeout: float | None = None) -> socket.socket:
+        opening = self._budget.remaining(CONNECT_TIMEOUT_SECONDS)
+        connection = socket.create_connection((self.host, self.port), timeout=opening)
+        if self._context is None:
+            self._budget.watch(connection)
+            return connection
+        # A wrapped socket takes over the plain one's descriptor: watch the wrapped one, and
+        # only then handshake.
+        secured = self._context.wrap_socket(
+            connection, server_hostname=self.host, do_handshake_on_connect=False
+        )
+        self._budget.watch(secured)
+        secured.do_handshake()
+        return secured
+
+
+class MailClient(IMAPClient):  # type: ignore[misc]  # the library has no type information
+    """IMAPClient over a `Connection` that is under the read's clock.
+
+    The library builds its connection in `_create_IMAP4`, which is the one place to give it
+    ours; the version is pinned exactly, and a test connects through this path.
+    """
+
+    def __init__(self, location: Location, context: ssl.SSLContext | None, budget: Budget) -> None:
+        self._budget = budget
+        super().__init__(
+            location.host,
+            location.port,
+            ssl=location.tls,
+            ssl_context=context,
+            timeout=CONNECT_TIMEOUT_SECONDS,
+        )
+
+    def _create_IMAP4(self) -> Connection:
+        context = self.ssl_context if self.ssl else None
+        return Connection(self.host, self.port, context, self._budget)
 
 
 def read_inbox(
@@ -197,6 +269,7 @@ def read_inbox(
     failure, including a read that takes longer than `limit`.
     """
     budget = Budget(limit)
+    budget.start()
     try:
         return _read(location, login, since, budget)
     except MailboxError:
@@ -209,44 +282,32 @@ def read_inbox(
         # timeout, a TLS failure, a response the library cannot parse, a structure that is
         # nested too deeply. All are an unreadable source, and none may say anything more.
         raise MailboxError from None
+    finally:
+        budget.stop()
 
 
 def _read(location: Location, login: Login, since: datetime, budget: Budget) -> InboxRead:
     budget.check()
     context = ssl.create_default_context() if location.tls else None
-    # Connecting is bounded by the socket timeout alone: the clock needs a connection to cut.
-    client = IMAPClient(
-        location.host,
-        location.port,
-        ssl=location.tls,
-        ssl_context=context,
-        timeout=CONNECT_TIMEOUT_SECONDS,
-    )
-    timer = budget.enforce(client)
-    try:
-        with client:  # logs out on the way out, still under the clock
-            client.normalise_times = False  # keep the offset the server gave
-            client.login(login.username, login.password.reveal())
-            folder: dict[bytes, Any] = client.select_folder(FOLDER, readonly=True)
-            validity = folder.get(b"UIDVALIDITY")
-            if not isinstance(validity, int):
-                raise MailboxError
-            # SINCE compares dates only, in the server's zone: start a day early, and let
-            # the gate drop what falls outside the window.
-            wanted: list[int] = sorted(client.search(["SINCE", since.date() - timedelta(days=1)]))
-            messages: list[InboxMessage] = []
-            skipped = 0
-            for start in range(0, len(wanted), BATCH_SIZE):
-                batch, unreadable = _fetch(
-                    client, wanted[start : start + BATCH_SIZE], validity, budget
-                )
-                messages.extend(batch)
-                skipped += unreadable
-        # A read that ran out of time on its last command, or on the logout whose failure the
-        # client swallows, is no success either.
-        budget.check()
-    finally:
-        timer.cancel()
+    with MailClient(location, context, budget) as client:  # logs out on the way out
+        client.normalise_times = False  # keep the offset the server gave
+        client.login(login.username, login.password.reveal())
+        folder: dict[bytes, Any] = client.select_folder(FOLDER, readonly=True)
+        validity = folder.get(b"UIDVALIDITY")
+        if not isinstance(validity, int):
+            raise MailboxError
+        # SINCE compares dates only, in the server's zone: start a day early, and let the
+        # gate drop what falls outside the window.
+        wanted: list[int] = sorted(client.search(["SINCE", since.date() - timedelta(days=1)]))
+        messages: list[InboxMessage] = []
+        skipped = 0
+        for start in range(0, len(wanted), BATCH_SIZE):
+            batch, unreadable = _fetch(client, wanted[start : start + BATCH_SIZE], validity, budget)
+            messages.extend(batch)
+            skipped += unreadable
+    # A read that ran out of time on its last command, or on the logout whose failure the
+    # client swallows, is no success either.
+    budget.check()
     return InboxRead(messages, skipped)
 
 
