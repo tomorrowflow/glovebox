@@ -1087,6 +1087,65 @@ async def test_events_that_share_a_uid_but_disagree_all_hold_their_time(
 
 
 @pytest.mark.anyio
+async def test_reordering_events_that_share_a_uid_keeps_each_handle_on_its_event(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    morning = event("shared", "2026-01-12T09:00:00Z", "2026-01-12T10:00:00Z")
+    evening = event("shared", "2026-01-12T17:00:00Z", "2026-01-12T18:00:00Z")
+    source = write_fixture(tmp_path / "calendar.json", calendar(morning, evening))
+    with start_gate(
+        accounts={"cal": source}, kinds={"cal": CALENDAR}, tokens={"default": ["cal"]}
+    ) as gate:
+        async with agent_client(gate) as client:
+            before = await events_of(client)
+            write_fixture(source, calendar(evening, morning))
+            reordered = await events_of(client)
+    with start_gate(
+        accounts={"cal": source}, kinds={"cal": CALENDAR}, tokens={"default": ["cal"]}
+    ) as restarted:
+        async with agent_client(restarted) as client:
+            after_restart = await events_of(client)
+
+    assert [e["start"] for e in before] == ["2026-01-12T09:00Z", "2026-01-12T17:00Z"]
+    assert len({e["event_handle"] for e in before}) == 2
+    # Each handle stays with the time block it had, whichever entry comes first.
+    assert reordered == before
+    assert after_restart == before
+
+
+@pytest.mark.anyio
+async def test_a_series_that_cannot_be_expanded_leaves_its_time_unknown_not_free(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    # A daily series from 1960 with no end: ongoing, but too far back to expand from its start.
+    document = calendar(
+        event(
+            "ancient",
+            "1960-01-01T09:00:00Z",
+            "1960-01-01T10:00:00Z",
+            recurrence={"freq": "daily"},
+        ),
+        event("known", "2026-01-12T12:00:00Z", "2026-01-12T13:00:00Z"),
+    )
+    day = {"range_from": "2026-01-12T00:00Z", "range_to": "2026-01-13T00:00Z"}
+    with publish(start_gate, tmp_path, document) as gate:
+        async with agent_client(gate) as client:
+            windows = await windows_of(client, **day)
+            listed = await call(client, EVENTS_TOOL)
+
+    # The series' own occurrences are not known, so no time is reported free; the event that
+    # is known still holds its time.
+    assert windows == [
+        ("2026-01-12T00:00Z", "2026-01-12T12:00Z", "unknown"),
+        ("2026-01-12T12:00Z", "2026-01-12T13:00Z", "busy"),
+        ("2026-01-12T13:00Z", "2026-01-13T00:00Z", "unknown"),
+    ]
+    assert [e["start"] for e in listed["events"]] == ["2026-01-12T12:00Z"]
+    (entry,) = listed["accounts"]
+    assert (entry["status"], entry["skipped_items"]) == ("incomplete", "1")
+
+
+@pytest.mark.anyio
 async def test_events_dropped_by_the_storage_cap_leave_their_time_unknown_not_free(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:

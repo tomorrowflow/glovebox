@@ -223,8 +223,10 @@ class Store:
         its end is stored cut there. At most MAX_EVENTS are kept, the earliest first; the
         rest count as skipped, and the start of the first one left out is recorded as where
         the account's coverage ends, so that time from then on is never reported as free.
-        The account is current, or incomplete if the source held events that could not be
-        understood or kept. An account the operator removed in the meantime is not written to.
+        So is the point from which the source says some of its events are not all known
+        (`calendar.unknown_from`). The account is current, or incomplete if the source held
+        events that could not be understood, expanded or kept. An account the operator
+        removed in the meantime is not written to.
         """
         window_start, _ = look_ahead(synced_at)
         with self._transaction() as database:
@@ -236,15 +238,16 @@ class Store:
             database.execute("delete from events where end_time <= ?", (minute(window_start),))
             skipped = calendar.skipped
             kept = 0
-            coverage_end = FULL_COVERAGE
+            incomplete_from = (
+                [] if calendar.unknown_from is None else [minute(calendar.unknown_from)]
+            )
             for event in sorted(calendar.events, key=lambda e: (e.start, e.upstream_id)):
                 served = clip_to_look_ahead(event.start, event.end, synced_at)
                 if served is None:
                     continue
                 if kept == MAX_EVENTS:
                     skipped += 1
-                    if coverage_end == FULL_COVERAGE:
-                        coverage_end = minute(served[0])
+                    incomplete_from.append(minute(served[0]))
                     continue
                 kept += 1
                 database.execute(
@@ -258,6 +261,7 @@ class Store:
                         event.busy_status,
                     ),
                 )
+            coverage_end = min(incomplete_from, default=FULL_COVERAGE)
             status: SyncStatus = "incomplete" if skipped else "current"
             database.execute(
                 "insert or replace into sync_state"

@@ -14,7 +14,7 @@ event spans local midnights, and so is 23 or 25 hours long on the day of a chang
 """
 
 import json
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from pathlib import Path
@@ -74,7 +74,10 @@ class SourceEvent:
 @dataclass(frozen=True)
 class SourceCalendar:
     events: list[SourceEvent]
-    skipped: int = 0  # events that could not be understood and were left out
+    skipped: int = 0  # events that could not be understood or expanded and were left out
+    # Set when a recurring event could not be expanded: from then on the calendar holds time
+    # that none of `events` says it holds.
+    unknown_from: datetime | None = None
 
 
 class CalendarSource(Protocol):
@@ -152,33 +155,59 @@ def parse_calendar(document: object, now: datetime) -> SourceCalendar:
     zone = _zone(document.get("timezone", "UTC"))
     if not isinstance(account, str) or not account or not isinstance(events, list) or zone is None:
         raise SourceError
-    found: dict[str, SourceEvent] = {}
+    found: list[SourceEvent] = []
     skipped = 0
+    unexpanded = False
     for raw in events:
-        parsed = _parse_event(raw, zone, now)
+        try:
+            parsed = _parse_event(raw, zone, now)
+        except _Unexpandable:
+            # A valid recurring event that holds time somewhere in the look-ahead, but where
+            # is not known.
+            skipped += 1
+            unexpanded = True
+            continue
         if parsed is None:
             skipped += 1
             continue
-        for event in parsed:
-            distinct = _distinct(found, event)
-            found.setdefault(distinct.upstream_id, distinct)
-    return SourceCalendar(events=list(found.values()), skipped=skipped)
+        found += parsed
+    return SourceCalendar(
+        events=_identified(found),
+        skipped=skipped,
+        unknown_from=look_ahead(now)[0] if unexpanded else None,
+    )
 
 
-def _distinct(found: Mapping[str, SourceEvent], event: SourceEvent) -> SourceEvent:
-    """The event under an identity of its own.
+def _identified(events: Sequence[SourceEvent]) -> list[SourceEvent]:
+    """The events, each under an identity of its own, and so with a handle of its own.
 
-    A repeat of an event found already keeps that one's identity. A different event under
-    the same UID gets the next free one, so that no event that holds time is dropped and
-    each has a handle of its own.
+    Events with one identity are one event repeated, unless they differ. Different events
+    under one UID have nothing to tell them apart but what they are, so each is identified by
+    its times and status, and not by where it came in the document: a handle stays with its
+    time block when the entries are reordered.
     """
-    candidate, number = event, 1
-    while (kept := found.get(candidate.upstream_id)) is not None:
-        if replace(kept, upstream_id=event.upstream_id) == event:
-            break
-        number += 1
-        candidate = replace(event, upstream_id=json.dumps([event.upstream_id, number]))
-    return candidate
+    groups: dict[str, list[SourceEvent]] = {}
+    for event in events:
+        members = groups.setdefault(event.upstream_id, [])
+        if event not in members:
+            members.append(event)
+    return [
+        event if len(members) == 1 else replace(event, upstream_id=_content_identity(event))
+        for members in groups.values()
+        for event in members
+    ]
+
+
+def _content_identity(event: SourceEvent) -> str:
+    return json.dumps(
+        [
+            event.upstream_id,
+            event.start.isoformat(),
+            event.end.isoformat(),
+            event.all_day,
+            event.busy_status,
+        ]
+    )
 
 
 def _identity(uid: str, day: date | None) -> str:
@@ -357,16 +386,21 @@ def _exceptions(raw: object) -> set[date] | None:
     return None if None in dates else {day for day in dates if day is not None}
 
 
+class _Unexpandable(Exception):
+    """A recurring event is understood, but its occurrences inside the look-ahead cannot be
+    worked out from its start, which is too far back."""
+
+
 def _days(first: date, rule: Recurrence) -> Iterator[date]:
     """The dates of the occurrences, from the first, as the rule gives them.
 
     The count and the end date apply to occurrences, left-out ones included. A rule that
-    needs more than MAX_CANDIDATES dates to get anywhere is not understood.
+    needs more than MAX_CANDIDATES dates to get anywhere cannot be expanded.
     """
     produced = 0
     for examined, day in enumerate(_candidates(first, rule), start=1):
         if examined > MAX_CANDIDATES:
-            raise OverflowError
+            raise _Unexpandable
         if day is None:
             continue
         if rule.until is not None and day > rule.until:
