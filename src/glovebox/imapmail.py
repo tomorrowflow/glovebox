@@ -20,6 +20,7 @@ what a server or a message says stays out of exceptions, logs and responses.
 import imaplib
 import ipaddress
 import logging
+import math
 import socket
 import ssl
 import threading
@@ -51,7 +52,7 @@ MAX_MESSAGE_BYTES = 64 * 1024
 # The whole window is read, this many messages to a command, so no one response is unbounded.
 BATCH_SIZE = 100
 CONNECT_TIMEOUT_SECONDS = 10
-# One read, from connecting to logout, is cut off after this long wherever the server stalls:
+# One read, from the name lookup to logout, is cut off after this long wherever the server stalls:
 # a read that has not finished by then is an outage, never a smaller success.
 DEFAULT_READ_DEADLINE = timedelta(seconds=120)
 FETCH_ITEMS = ["FLAGS", "INTERNALDATE", "BODYSTRUCTURE", f"BODY.PEEK[]<0.{MAX_MESSAGE_BYTES}>"]
@@ -152,13 +153,13 @@ def login_of(secret: Secret) -> Login | None:
 
 
 class Budget:
-    """The time one read may take, from connecting to the end of the logout.
+    """The time one read may take, from the name lookup to the end of the logout.
 
-    It is checked before every command, so retries and the end of the read count too. And it
-    is enforced during one: every socket the read opens is watched from the moment it exists,
-    and at the limit it is shut down, which ends a connect, a TLS handshake, a greeting or a
-    command that waits on a server that stalls or trickles bytes, where no socket timeout
-    would. What no clock can cut is the name lookup before the first socket exists.
+    It is checked before every step, so retries and the end of the read count too. And it is
+    enforced during one: the lookup and each connect attempt get only the time left, and every
+    socket the read opens is watched from the moment it is connected and at the limit is shut
+    down, which ends a TLS handshake, a greeting or a command that waits on a server that
+    stalls or trickles bytes, where no socket timeout would. Use it as a context manager.
     """
 
     def __init__(self, limit: timedelta) -> None:
@@ -167,6 +168,13 @@ class Budget:
         self._lock = threading.Lock()
         self._sockets: list[socket.socket] = []
         self._timer: threading.Timer | None = None
+
+    def __enter__(self) -> "Budget":
+        self.start()
+        return self
+
+    def __exit__(self, *exception: object) -> None:
+        self.stop()
 
     def start(self) -> None:
         """Start the clock; `stop` ends it when the read is over."""
@@ -186,8 +194,9 @@ class Budget:
     def spent(self) -> bool:
         return self._spent.is_set()
 
-    def remaining(self, cap: float) -> float:
-        """The seconds left, at most `cap`: a step that must not outlast the read."""
+    def remaining(self, cap: float = math.inf) -> float:
+        """The seconds left, at most `cap`, for a step that must not outlast the read.
+        Raises MailboxError if there are none."""
         self.check()
         return min(cap, self._end - time.monotonic())
 
@@ -208,34 +217,72 @@ class Budget:
                 pass  # already closed: the read has ended one way or the other
 
 
-class Connection(imaplib.IMAP4):
-    """The connection of one read, plain or TLS, whose socket is put under the read's clock
-    as soon as it is open and before the TLS handshake and the greeting, which a server can
-    stall or trickle like any other answer."""
+class WatchedConnection(imaplib.IMAP4):
+    """The connection of one read, plain or TLS, set up under the read's clock: the name
+    lookup and each connect attempt get the time left, and the socket is watched as soon as
+    it is connected, before the TLS handshake and the greeting, which a server can stall or
+    trickle like any other answer."""
 
-    def __init__(self, host: str, port: int, context: ssl.SSLContext | None, budget: Budget):
+    def __init__(
+        self, host: str, port: int, context: ssl.SSLContext | None, budget: Budget
+    ) -> None:
         self._context = context
         self._budget = budget
         super().__init__(host, port)
 
     def _create_socket(self, timeout: float | None = None) -> socket.socket:
-        opening = self._budget.remaining(CONNECT_TIMEOUT_SECONDS)
-        connection = socket.create_connection((self.host, self.port), timeout=opening)
-        if self._context is None:
+        connection = self._reach_server()
+        try:
+            if self._context is not None:
+                # A wrapped socket takes over the plain one's descriptor: watch the wrapped
+                # one, and only then handshake.
+                connection = self._context.wrap_socket(
+                    connection, server_hostname=self.host, do_handshake_on_connect=False
+                )
             self._budget.watch(connection)
-            return connection
-        # A wrapped socket takes over the plain one's descriptor: watch the wrapped one, and
-        # only then handshake.
-        secured = self._context.wrap_socket(
-            connection, server_hostname=self.host, do_handshake_on_connect=False
-        )
-        self._budget.watch(secured)
-        secured.do_handshake()
-        return secured
+            if isinstance(connection, ssl.SSLSocket):
+                connection.do_handshake()
+        except BaseException:
+            connection.close()  # imaplib closes nothing of a connection that failed to open
+            raise
+        return connection
+
+    def _reach_server(self) -> socket.socket:
+        """A connected socket to the first address that answers, within the time left."""
+        for family, kind, protocol, _, address in self._resolve():
+            attempt = socket.socket(family, kind, protocol)
+            try:
+                attempt.settimeout(self._budget.remaining(CONNECT_TIMEOUT_SECONDS))
+                attempt.connect(address)
+            except OSError:
+                attempt.close()  # the next address may answer
+                continue
+            except BaseException:
+                attempt.close()
+                raise
+            return attempt
+        raise OSError("no address answered")
+
+    def _resolve(self) -> list[Any]:
+        """The addresses of the host. The system resolver cannot be interrupted, so it runs
+        on a thread that is left behind, harmlessly, if the time runs out first."""
+        found: list[Any] = []
+
+        def look() -> None:
+            try:
+                found.extend(socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM))
+            except OSError:
+                pass  # no addresses: handled as a host that does not answer
+
+        lookup = threading.Thread(target=look, daemon=True)
+        lookup.start()
+        lookup.join(self._budget.remaining())
+        self._budget.check()
+        return found
 
 
 class MailClient(IMAPClient):  # type: ignore[misc]  # the library has no type information
-    """IMAPClient over a `Connection` that is under the read's clock.
+    """IMAPClient over a `WatchedConnection`, which is under the read's clock.
 
     The library builds its connection in `_create_IMAP4`, which is the one place to give it
     ours; the version is pinned exactly, and a test connects through this path.
@@ -251,9 +298,10 @@ class MailClient(IMAPClient):  # type: ignore[misc]  # the library has no type i
             timeout=CONNECT_TIMEOUT_SECONDS,
         )
 
-    def _create_IMAP4(self) -> Connection:
-        context = self.ssl_context if self.ssl else None
-        return Connection(self.host, self.port, context, self._budget)
+    def _create_IMAP4(self) -> WatchedConnection:
+        # A TLS connection never goes without a context: that would be a plain one.
+        context = (self.ssl_context or ssl.create_default_context()) if self.ssl else None
+        return WatchedConnection(self.host, self.port, context, self._budget)
 
 
 def read_inbox(
@@ -269,9 +317,9 @@ def read_inbox(
     failure, including a read that takes longer than `limit`.
     """
     budget = Budget(limit)
-    budget.start()
     try:
-        return _read(location, login, since, budget)
+        with budget:
+            return _read(location, login, since, budget)
     except MailboxError:
         raise
     except LoginError:
@@ -282,8 +330,6 @@ def read_inbox(
         # timeout, a TLS failure, a response the library cannot parse, a structure that is
         # nested too deeply. All are an unreadable source, and none may say anything more.
         raise MailboxError from None
-    finally:
-        budget.stop()
 
 
 def _read(location: Location, login: Login, since: datetime, budget: Budget) -> InboxRead:

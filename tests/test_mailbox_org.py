@@ -11,9 +11,11 @@ What mailbox.org itself does is checked by the operator (docs/mailbox-org-mail.m
 
 import dataclasses
 import json
+import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
@@ -795,18 +797,67 @@ def test_a_connection_that_never_gets_set_up_is_cut_off_at_the_time_limit(
     fault: str, scheme: str
 ) -> None:
     """Setting up the connection (the greeting, or the TLS handshake of `imaps`) is under the
-    same clock as the rest of the read: no socket timeout is what ends it."""
+    same clock as the rest of the read: it ends at the read's one-second limit, not after the
+    ten seconds of a socket timeout. A trickled greeting is what only the watchdog can end,
+    since every byte of it resets a socket timeout; and the next read recovers."""
+    login = imapmail.Login(USER, Secret(PASSWORD))
     with imap_serving(inbox()) as standin:
         standin.fault = fault
         location = imapmail.location_of(f"{scheme}://127.0.0.1:{standin.port}")
         started = time.monotonic()
         with pytest.raises(imapmail.MailboxError):
-            imapmail.read_inbox(
-                location, imapmail.Login(USER, Secret(PASSWORD)), WINDOW_START, timedelta(seconds=1)
-            )
+            imapmail.read_inbox(location, login, WINDOW_START, timedelta(seconds=1))
+        elapsed = time.monotonic() - started
+        assert standin.commands == []  # nothing was sent after the greeting that never came
 
-    assert time.monotonic() - started < imapmail.CONNECT_TIMEOUT_SECONDS - 4
-    assert standin.commands == []  # nothing was sent after the greeting that never came
+        standin.fault = None
+        if scheme == "imap":  # the plain stand-in cannot answer a TLS handshake
+            recovered = imapmail.read_inbox(location, login, WINDOW_START)
+            assert len(recovered.messages) == 5
+
+    assert elapsed < 5
+
+
+def test_a_name_lookup_that_never_ends_is_cut_off_at_the_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ended = threading.Event()
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: ended.wait(30) and [])
+    login = imapmail.Login(USER, Secret(PASSWORD))
+    started = time.monotonic()
+    try:
+        with pytest.raises(imapmail.MailboxError):
+            imapmail.read_inbox(
+                imapmail.location_of("imaps://mail.example.test"),
+                login,
+                WINDOW_START,
+                timedelta(seconds=1),
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        ended.set()  # let the left-behind lookup thread go
+
+    assert elapsed < 5
+
+
+def test_a_connection_that_fails_to_set_up_is_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A TLS handshake the client refuses leaves no open socket behind."""
+    closed: list[object] = []
+    close = ssl.SSLSocket.close
+
+    def recording_close(self: ssl.SSLSocket) -> None:
+        closed.append(self)
+        close(self)
+
+    monkeypatch.setattr(ssl.SSLSocket, "close", recording_close)
+    login = imapmail.Login(USER, Secret(PASSWORD))
+    with imap_serving(inbox(), self_signed_certificate(tmp_path)) as standin:
+        with pytest.raises(imapmail.MailboxError):  # an untrusted certificate
+            imapmail.read_inbox(imapmail.location_of(standin.url), login, WINDOW_START)
+
+    assert closed
 
 
 def test_a_read_that_retries_message_by_message_still_keeps_to_its_time_limit(clock: str) -> None:
@@ -837,7 +888,7 @@ def test_a_logout_that_stalls_is_cut_off_at_the_time_limit() -> None:
         with pytest.raises(imapmail.MailboxError):
             read_standin(standin, timedelta(seconds=1))
 
-    assert time.monotonic() - started < imapmail.CONNECT_TIMEOUT_SECONDS - 1  # not the socket's
+    assert time.monotonic() - started < 5  # a socket timeout alone would take ten seconds
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "soon", "1.5", "3601", "99999999999999999999"])
