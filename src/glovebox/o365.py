@@ -16,6 +16,7 @@ Nothing an upstream said is kept: errors carry no detail, and neither Graph's no
 authority's error text is read into an exception, a log line or a response.
 """
 
+import http.client
 import json
 import logging
 import re
@@ -198,18 +199,18 @@ class Session:
         """
         try:
             accounts = self.app.get_accounts()
-            if len(accounts) != 1:
-                # Nobody signed in, or a cache that could be anyone's: not access to use.
-                raise SourceBlocked
             # The `_with_error` form tells a refresh that failed (and why) from a cache with no
             # refresh token to try, which is the only case where it answers None.
-            result = self.app.acquire_token_silent_with_error(SCOPES, account=accounts[0])
-        except SourceError:
-            raise
+            result = (
+                self.app.acquire_token_silent_with_error(SCOPES, account=accounts[0])
+                if len(accounts) == 1
+                else None
+            )
         except Exception:
             # MSAL raises whatever its HTTP and parsing layers do; none of it may carry on.
             raise SourceError from None
         if result is None:
+            # Nobody signed in, or a cache that could be anyone's: not access to use.
             raise SourceBlocked
         token = result.get("access_token")
         if not isinstance(token, str) or not token:
@@ -330,20 +331,13 @@ def get_page(url: str, token: str, deadline: float) -> Mapping[str, object]:
     try:
         with opener.open(request, timeout=min(FETCH_TIMEOUT_SECONDS, remaining)) as response:
             data = response.read(MAX_PAGE_BYTES + 1)
-        if len(data) > MAX_PAGE_BYTES:
-            raise SourceError
-        document = json.loads(data)
-    except SourceError:
-        raise
+        document = json.loads(data) if len(data) <= MAX_PAGE_BYTES else None
     except urllib.error.HTTPError as error:
         error.close()
         if error.code in BLOCKED_HTTP_STATUSES:
             raise SourceBlocked from None
         raise SourceError from None
-    except (OSError, ValueError, RecursionError, urllib.error.URLError):
-        raise SourceError from None
-    except Exception:
-        # http.client's own errors (a malformed status line, a dropped body) are not OSErrors.
+    except (OSError, ValueError, RecursionError, http.client.HTTPException):
         raise SourceError from None
     if not isinstance(document, Mapping):
         raise SourceError
