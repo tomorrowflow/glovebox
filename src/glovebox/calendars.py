@@ -77,7 +77,7 @@ class SourceCalendar:
     skipped: int = 0  # events that could not be understood or expanded and were left out
     # Set when a recurring event could not be expanded: from then on the calendar holds time
     # that none of `events` says it holds.
-    unknown_from: datetime | None = None
+    incomplete_from: datetime | None = None
 
 
 class CalendarSource(Protocol):
@@ -174,7 +174,7 @@ def parse_calendar(document: object, now: datetime) -> SourceCalendar:
     return SourceCalendar(
         events=_identified(found),
         skipped=skipped,
-        unknown_from=look_ahead(now)[0] if unexpanded else None,
+        incomplete_from=look_ahead(now)[0] if unexpanded else None,
     )
 
 
@@ -221,7 +221,10 @@ def _identity(uid: str, day: date | None) -> str:
 
 def _parse_event(raw: object, default_zone: tzinfo, now: datetime) -> list[SourceEvent] | None:
     """The occurrences of one event that the look-ahead serves, or None if it cannot be
-    understood. Date arithmetic that leaves the supported years is not understood either."""
+    understood. Date arithmetic that leaves the supported years is not understood either.
+
+    Raises _Unexpandable for a recurring event that is understood but cannot be expanded.
+    """
     try:
         return _occurrences_of(raw, default_zone, now)
     except (OverflowError, ValueError):
@@ -249,20 +252,22 @@ def _occurrences_of(raw: object, default_zone: tzinfo, now: datetime) -> list[So
     status = busy_status_of(raw)
 
     events = []
-    window_end = look_ahead(now)[1]
-    days = [first_day] if rule is None else _days(first_day, rule)
+    window_start, window_end = look_ahead(now)
+    # An occurrence that began this many days before the look-ahead cannot still be running.
+    first_start, first_end = span_of(first_day)
+    skip_to = window_start.date() - timedelta(days=(first_end - first_start).days + 2)
+    days = [first_day] if rule is None else _days(first_day, rule, skip_to)
     for day in days:
         start, end = span_of(day)
         if start >= window_end:
             break
-        served = clip_to_look_ahead(start, end, now)
-        if served is None or day in exceptions:
+        if clip_to_look_ahead(start, end, now) is None or day in exceptions:
             continue
         events.append(
             SourceEvent(
                 upstream_id=_identity(uid, None if rule is None else day),
-                start=_minute(served[0]),
-                end=_minute(served[1]),
+                start=_minute(start),
+                end=_minute(end),
                 all_day=all_day,
                 busy_status=status,
             )
@@ -391,14 +396,15 @@ class _Unexpandable(Exception):
     worked out from its start, which is too far back."""
 
 
-def _days(first: date, rule: Recurrence) -> Iterator[date]:
+def _days(first: date, rule: Recurrence, skip_to: date) -> Iterator[date]:
     """The dates of the occurrences, from the first, as the rule gives them.
 
-    The count and the end date apply to occurrences, left-out ones included. A rule that
-    needs more than MAX_CANDIDATES dates to get anywhere cannot be expanded.
+    The count and the end date apply to occurrences, left-out ones included. Dates well
+    before `skip_to` may be left out, where that changes no count. A rule that needs more
+    than MAX_CANDIDATES dates to get anywhere cannot be expanded.
     """
     produced = 0
-    for examined, day in enumerate(_candidates(first, rule), start=1):
+    for examined, day in enumerate(_candidates(first, rule, skip_to), start=1):
         if examined > MAX_CANDIDATES:
             raise _Unexpandable
         if day is None:
@@ -411,10 +417,28 @@ def _days(first: date, rule: Recurrence) -> Iterator[date]:
             return
 
 
-def _candidates(first: date, rule: Recurrence) -> Iterator[date | None]:
-    """Each step of the rule: a date, or None where the step falls on a day that does not
-    exist (the 31st in a short month, 29 February in a year that is not a leap year)."""
-    step = 0
+def _steps_before(first: date, rule: Recurrence, skip_to: date) -> int:
+    """How many steps of the rule fall before `skip_to`, and need not be taken.
+
+    Only a rule with no count can skip, as a count is of occurrences from the first. Daily and
+    weekly rules step by whole days, so the skipped steps are worked out; monthly and yearly
+    ones have few dates to step through.
+    """
+    if rule.count is not None or skip_to <= first:
+        return 0
+    if rule.freq == "daily":
+        return (skip_to - first).days // rule.interval
+    if rule.freq == "weekly":
+        monday = first - timedelta(days=first.weekday())
+        return (skip_to - monday).days // 7 // rule.interval
+    return 0
+
+
+def _candidates(first: date, rule: Recurrence, skip_to: date) -> Iterator[date | None]:
+    """Each step of the rule from the first one that is not before `skip_to`: a date, or None
+    where the step falls on a day that does not exist (the 31st in a short month, 29 February
+    in a year that is not a leap year)."""
+    step = _steps_before(first, rule, skip_to)
     if rule.freq == "weekly":
         week = first - timedelta(days=first.weekday())
         weekdays = rule.by_day or (first.weekday(),)

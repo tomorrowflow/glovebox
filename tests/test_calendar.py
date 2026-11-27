@@ -1117,13 +1117,14 @@ async def test_reordering_events_that_share_a_uid_keeps_each_handle_on_its_event
 async def test_a_series_that_cannot_be_expanded_leaves_its_time_unknown_not_free(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:
-    # A daily series from 1960 with no end: ongoing, but too far back to expand from its start.
+    # A monthly series from the year 1 with no end: ongoing, but 24,000 months back, more than
+    # the gate will step through to find where it is now.
     document = calendar(
         event(
             "ancient",
-            "1960-01-01T09:00:00Z",
-            "1960-01-01T10:00:00Z",
-            recurrence={"freq": "daily"},
+            "0001-01-01T09:00:00Z",
+            "0001-01-01T10:00:00Z",
+            recurrence={"freq": "monthly"},
         ),
         event("known", "2026-01-12T12:00:00Z", "2026-01-12T13:00:00Z"),
     )
@@ -1143,6 +1144,71 @@ async def test_a_series_that_cannot_be_expanded_leaves_its_time_unknown_not_free
     assert [e["start"] for e in listed["events"]] == ["2026-01-12T12:00Z"]
     (entry,) = listed["accounts"]
     assert (entry["status"], entry["skipped_items"]) == ("incomplete", "1")
+
+
+@pytest.mark.anyio
+async def test_daily_and_weekly_series_from_long_ago_are_expanded_or_found_to_be_over(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    document = calendar(
+        # Ongoing since 1960, and 09:00 to 10:00 on the 13th of January falls in it.
+        event(
+            "daily", "1960-01-01T09:00:00Z", "1960-01-01T10:00:00Z", recurrence={"freq": "daily"}
+        ),
+        # Mondays and Thursdays at 14:00 since 1900.
+        event(
+            "weekly",
+            "1900-01-01T14:00:00Z",
+            "1900-01-01T15:00:00Z",
+            recurrence={"freq": "weekly", "by_day": ["mo", "th"]},
+        ),
+        # Over since 1990: nothing of it is left in the look-ahead, and nothing is unknown.
+        event(
+            "over",
+            "1900-01-01T20:00:00Z",
+            "1900-01-01T21:00:00Z",
+            recurrence={"freq": "daily", "until": "1990-12-31"},
+        ),
+    )
+    day = {"range_from": "2026-01-13T00:00Z", "range_to": "2026-01-14T00:00Z"}
+    with publish(start_gate, tmp_path, document) as gate:
+        async with agent_client(gate) as client:
+            windows = await windows_of(client, **day)
+            listed = await call(
+                client, EVENTS_TOOL, range_from="2026-01-12T00:00Z", range_to="2026-01-13T00:00Z"
+            )
+
+    # 13 January 2026 is a Tuesday: the daily series holds 09:00, the weekly one nothing.
+    assert windows == [
+        ("2026-01-13T00:00Z", "2026-01-13T09:00Z", "free"),
+        ("2026-01-13T09:00Z", "2026-01-13T10:00Z", "busy"),
+        ("2026-01-13T10:00Z", "2026-01-14T00:00Z", "free"),
+    ]
+    # The day before is a Monday, with an occurrence of each ongoing series and none of the
+    # one that is over.
+    assert [e["start"] for e in listed["events"]] == ["2026-01-12T09:00Z", "2026-01-12T14:00Z"]
+    (entry,) = listed["accounts"]
+    assert (entry["status"], entry["skipped_items"]) == ("current", "0")
+
+
+@pytest.mark.anyio
+async def test_a_shared_uid_event_keeps_its_handle_as_the_clock_moves_under_a_cut_end(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    # Two events under one UID, one of which runs past the end of the look-ahead and is cut
+    # there, at a different minute for every clock.
+    document = calendar(
+        event("shared", "2026-04-10T09:00:00Z", "2026-04-10T10:00:00Z"),
+        event("shared", "2026-04-10T11:00:00Z", "2026-04-11T11:00:00Z"),
+    )
+    handles = []
+    for now in ("2026-01-10T11:30:00Z", "2026-01-10T11:45:00Z"):
+        with publish(start_gate, tmp_path, document, now=now) as gate:
+            async with agent_client(gate) as client:
+                handles.append({e["start"]: e["event_handle"] for e in await events_of(client)})
+
+    assert set(handles[0]) == {"2026-04-10T09:00Z", "2026-04-10T11:00Z"}
+    assert handles[0] == handles[1]
 
 
 @pytest.mark.anyio

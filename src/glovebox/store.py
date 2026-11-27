@@ -224,7 +224,7 @@ class Store:
         rest count as skipped, and the start of the first one left out is recorded as where
         the account's coverage ends, so that time from then on is never reported as free.
         So is the point from which the source says some of its events are not all known
-        (`calendar.unknown_from`). The account is current, or incomplete if the source held
+        (`calendar.incomplete_from`). The account is current, or incomplete if the source held
         events that could not be understood, expanded or kept. An account the operator
         removed in the meantime is not written to.
         """
@@ -239,7 +239,7 @@ class Store:
             skipped = calendar.skipped
             kept = 0
             incomplete_from = (
-                [] if calendar.unknown_from is None else [minute(calendar.unknown_from)]
+                [] if calendar.incomplete_from is None else [minute(calendar.incomplete_from)]
             )
             for event in sorted(calendar.events, key=lambda e: (e.start, e.upstream_id)):
                 served = clip_to_look_ahead(event.start, event.end, synced_at)
