@@ -7,7 +7,7 @@ new fixture built the same way); to cover a new response channel, add it to
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 
 import httpx2
@@ -64,9 +64,14 @@ def _windows(text: str) -> set[str]:
     }
 
 
+def fragments_of(texts: Iterable[str]) -> set[str]:
+    """Every FRAGMENT_LENGTH-character window of every string, in every form."""
+    return {w for text in texts for form in _forms(text) for w in _windows(form)}
+
+
 def corpus_fragments() -> set[str]:
     """Every FRAGMENT_LENGTH-character window of every corpus string, in every form."""
-    return {w for text in CORPUS.values() for form in _forms(text) for w in _windows(form)}
+    return fragments_of(CORPUS.values())
 
 
 def leaks(channels: Mapping[str, str | bytes]) -> dict[str, list[str]]:
