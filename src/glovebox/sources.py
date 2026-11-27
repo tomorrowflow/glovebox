@@ -27,10 +27,11 @@ from glovebox import chatdb
 from glovebox.credentials import Secret, read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
-SourceKind = Literal["fixture_mail", "fixture_messenger", "imessage"]
+SourceKind = Literal["fixture_mail", "fixture_messenger", "imessage", "o365_mail"]
 # Who stops a write to the source. `provider`: the access method cannot write at all, so the
 # gate could not write if it tried. `gateway`: the access method could write and the gate has
-# no code path that does (ADR 0003). No source has a provider-enforced read-only access yet.
+# no code path that does (ADR 0003). Office 365 mail is the one source whose credential
+# cannot write.
 ReadOnlyEnforcement = Literal["gateway", "provider"]
 # How fresh and complete an account's data is. `current`: the last sync read the whole
 # source. `incomplete`: it did, but some items could not be understood and are missing.
@@ -38,10 +39,13 @@ ReadOnlyEnforcement = Literal["gateway", "provider"]
 # sync failed because access is not granted.
 SyncStatus = Literal["current", "stale", "incomplete", "blocked"]
 SOURCE_KINDS: tuple[str, ...] = get_args(SourceKind)
-READ_ONLY_ENFORCEMENT: dict[str, ReadOnlyEnforcement] = dict.fromkeys(SOURCE_KINDS, "gateway")
+READ_ONLY_ENFORCEMENT: dict[str, ReadOnlyEnforcement] = {
+    **dict.fromkeys(SOURCE_KINDS, "gateway"),
+    "o365_mail": "provider",
+}
 # Kinds whose account must name a credentials file. The fixture kinds and the iMessage
 # source (a local file, or a stand-in that asks for none) need none.
-CREDENTIALS_REQUIRED: frozenset[str] = frozenset()
+CREDENTIALS_REQUIRED: frozenset[str] = frozenset({"o365_mail"})
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 10
@@ -463,6 +467,13 @@ def open_source(
     Raises CredentialsError, which carries no detail, if the file cannot be used.
     """
     secret = read_credentials(credentials) if credentials is not None else None
+    if kind == "o365_mail":
+        if secret is None or credentials is None:
+            raise SourceBlocked
+        # Imported late: MSAL and its HTTP library load only for an account that needs them.
+        from glovebox.o365 import O365MailSource
+
+        return O365MailSource(location, credentials, secret)
     adapter = FIXTURE_SOURCES.get(kind)
     if adapter is None:
         raise SourceError

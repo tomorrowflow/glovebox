@@ -55,3 +55,27 @@ def read_credentials(path: Path) -> Secret:
         return Secret(data.decode("utf-8").strip())
     except UnicodeDecodeError:
         raise CredentialsError("the credentials file is not text") from None
+
+
+def write_credentials(path: Path, text: str) -> None:
+    """Replace the contents of a credentials file, or create it, closed to group and others.
+
+    The new contents are written to a file of mode 0600 next to the target and renamed over
+    it, so a reader sees the old file or the new one whole. A symlink is followed: the
+    operator's link stays a link.
+    """
+    target = Path(os.path.realpath(path))
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    except OSError:
+        raise CredentialsError("the credentials file cannot be written") from None
