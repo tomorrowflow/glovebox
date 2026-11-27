@@ -234,9 +234,9 @@ async def test_an_unreadable_message_is_skipped_and_counted_not_served(
 
 
 def test_something_that_is_not_a_message_is_not_an_item() -> None:
-    assert o365.parse_message("a message") is None
-    assert o365.parse_message(["id", "from"]) is None
-    assert o365.parse_message({}) is None
+    assert o365.parse_graph_message("a message") is None
+    assert o365.parse_graph_message(["id", "from"]) is None
+    assert o365.parse_graph_message({}) is None
 
 
 # --- read-only, enforced by the provider ----------------------------------------------------
@@ -536,6 +536,25 @@ async def test_graph_refusing_the_token_is_blocked_and_recovers_when_access_retu
 
 
 @pytest.mark.anyio
+async def test_a_token_that_graph_refused_is_not_served_from_the_cache_again(
+    start_gate: GateStarter, microsoft: Microsoft, tmp_path: Path
+) -> None:
+    microsoft.expires_in = 3600  # the cached access token would last an hour
+    add_account(tmp_path, microsoft, sign_in(microsoft, tmp_path))
+    with work_gate(start_gate, microsoft) as gate:
+        async with agent_client(gate) as client:
+            microsoft.graph_fault = "unauthorized"
+            refused = await call(client, COUNT_TOOL)
+            microsoft.graph_fault = None
+            after = await call(client, COUNT_TOOL)
+
+    assert account_of(refused)["status"] == "blocked"
+    assert (after["error"], after["count"]) == ("none", "3")
+    # The refused token was dropped, so the recovery asked the authority for another.
+    assert len(microsoft.token_requests()) == 1
+
+
+@pytest.mark.anyio
 async def test_a_gate_restart_keeps_the_login(
     start_gate: GateStarter, microsoft: Microsoft, signed_in: Path
 ) -> None:
@@ -822,7 +841,7 @@ def test_errors_carry_no_detail_from_upstream(microsoft: Microsoft, signed_in: P
 
 def test_the_adapter_does_not_print_its_items_text() -> None:
     message = graph_message("a1", f"bob@{WORK}", "2026-01-05T09:00:59Z", subject="S3CRET")
-    item = o365.parse_message(message)
+    item = o365.parse_graph_message(message)
 
     assert item is not None and "S3CRET" in item.text and "S3CRET" not in repr(item)
 
@@ -843,6 +862,23 @@ def test_the_adapter_does_not_print_its_items_text() -> None:
 )
 def test_which_permissions_could_write(granted: str, writes: bool) -> None:
     assert o365.can_write(o365.granted_scopes(granted)) is writes
+
+
+def test_a_token_that_names_no_permissions_is_not_shown_to_be_read_only() -> None:
+    assert o365.read_only(o365.granted_scopes("Mail.Read openid")) is True
+    assert o365.read_only(o365.granted_scopes("Mail.Read Mail.Send")) is False
+    assert o365.read_only(o365.granted_scopes("")) is False
+
+
+def test_a_token_whose_permissions_the_authority_did_not_name_is_refused(
+    microsoft: Microsoft, signed_in: Path
+) -> None:
+    microsoft.scope = ""
+
+    with pytest.raises(SourceBlocked):
+        adapter(microsoft, signed_in).fetch(WINDOW_START, NOW)
+
+    assert microsoft.graph_requests() == []
 
 
 # --- the credentials file ---------------------------------------------------------------------

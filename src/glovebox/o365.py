@@ -160,6 +160,12 @@ def can_write(granted: frozenset[str]) -> bool:
     )
 
 
+def read_only(granted: frozenset[str]) -> bool:
+    """Whether a token is shown to be unable to write: it names its permissions, and none of
+    them could. A token that names none is not shown to be anything."""
+    return bool(granted) and not can_write(granted)
+
+
 def token_scopes(cache: msal.SerializableTokenCache, token: str) -> frozenset[str]:
     """The permissions the authority recorded for this access token."""
     for entry in cache.search(msal.TokenCache.CredentialType.ACCESS_TOKEN):
@@ -218,9 +224,14 @@ class Session:
             if isinstance(error, str) and error in BLOCKING_TOKEN_ERRORS:
                 raise SourceBlocked
             raise SourceError
-        if can_write(token_scopes(self.cache, token)):
+        if not read_only(token_scopes(self.cache, token)):
             raise SourceBlocked
         return token
+
+    def forget_access_tokens(self) -> None:
+        """Drop the cached access tokens, so that the next sync asks the authority for one."""
+        for entry in list(self.cache.search(msal.TokenCache.CredentialType.ACCESS_TOKEN)):
+            self.cache.remove_at(entry)
 
     def refreshed(self) -> Login | None:
         """The login with MSAL's current cache, if refreshing changed it."""
@@ -257,7 +268,13 @@ class O365MailSource:
             token = session.access_token()
         finally:
             self._remember(session)
-        return self._read(token, since, deadline)
+        try:
+            return self._read(token, since, deadline)
+        except SourceBlocked:
+            # Graph refused a token the cache thought good: it is not handed out again.
+            session.forget_access_tokens()
+            self._remember(session)
+            raise
 
     def _remember(self, session: Session) -> None:
         """Keep a refreshed token cache: Microsoft replaces the refresh token as it is used."""
@@ -286,7 +303,7 @@ class O365MailSource:
             if not isinstance(messages, list):
                 raise SourceError
             for message in messages:
-                item = parse_message(message)
+                item = parse_graph_message(message)
                 if item is None:
                     skipped += 1
                 elif item.upstream_id not in items:
@@ -344,7 +361,7 @@ def get_page(url: str, token: str, deadline: float) -> Mapping[str, object]:
     return document
 
 
-def parse_message(message: object) -> SourceItem | None:
+def parse_graph_message(message: object) -> SourceItem | None:
     """One Graph message as an item, or None if it cannot be understood.
 
     Only the keys named in `FIELDS` are read, and of those only an ID, the sender's address,
@@ -372,7 +389,7 @@ def parse_message(message: object) -> SourceItem | None:
         received=received,
         read_status=read_status_of(message.get("isRead")),
         has_attachments=has_attachments,
-        text=text_of(message),
+        text=graph_text_of(message),
     )
 
 
@@ -385,7 +402,7 @@ def address_of(sender: object) -> str | None:
     return sender_key_of(address)
 
 
-def text_of(message: Mapping[str, object]) -> str:
+def graph_text_of(message: Mapping[str, object]) -> str:
     """The subject and the body text, those of them that are strings, cut to the limit."""
     body = message.get("body")
     content = body.get("content") if isinstance(body, Mapping) else None
@@ -414,10 +431,11 @@ def sign_in(client_id: str, authority: str, announce: Callable[[str], None]) -> 
     token = result.get("access_token")
     if not isinstance(token, str):
         raise SignInFailed(describe(result))
-    if can_write(token_scopes(cache, token)):
+    if not read_only(token_scopes(cache, token)):
         raise SignInFailed(
-            "the app registration grants more than read access to mail: remove its write "
-            "permissions in the Entra admin center, or use another registration"
+            "the login is not shown to be read-only: the app registration grants more than "
+            "read access to mail (remove its write permissions in the Entra admin center, or "
+            "use another registration), or the authority did not say what it grants"
         )
     return Login(client_id, authority, cache.serialize())
 

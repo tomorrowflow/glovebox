@@ -145,6 +145,7 @@ def _account(args: argparse.Namespace, access: Access, out: TextIO) -> int:
 
 def _checked_login(source: str, secret: Secret) -> None:
     """Refuse an Office 365 account whose Graph endpoint or credentials file cannot work."""
+    # Imported late, like `sources.open_source` does: MSAL loads only when it is needed.
     from glovebox.o365 import Login, LoginError, graph_problem
 
     problem = graph_problem(source)
