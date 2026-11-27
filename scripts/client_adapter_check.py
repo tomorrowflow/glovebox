@@ -65,7 +65,9 @@ class Rules:
         self.tool_text = {
             text
             for spec in SPECS.values()
-            for text in strings(spec.definition.model_dump(by_alias=True, exclude_none=True))
+            for text in strings(
+                spec.definition.model_dump(by_alias=True, exclude_none=True), keys=True
+            )
         }
 
     def leaks(self, value: Any) -> int:
@@ -90,7 +92,7 @@ class Rules:
         """How many parts of `value` are neither static text nor a permitted payload."""
         if section == "tool_listing":
             allowed = self.tool_text | static
-            return sum(1 for text in strings(value) if text not in allowed)
+            return sum(1 for text in strings(value, keys=True) if text not in allowed)
         return sum(
             1
             for payload, text in payloads_and_text(value)
@@ -128,24 +130,27 @@ def container(text: str, depth: int) -> Any:
         return None
 
 
-def strings(value: Any, depth: int = 0) -> list[str]:
-    """Every string of `value` that is not a key, looking inside JSON held in a string."""
+def strings(value: Any, keys: bool = False, depth: int = 0) -> list[str]:
+    """Every string of `value`, and its object keys if `keys`, reading JSON held in a string."""
     if isinstance(value, str):
         inner = container(value, depth)
-        return [value] if inner is None else [*strings(inner, depth + 1), value]
+        return [value] if inner is None else [*strings(inner, keys, depth + 1), value]
     if isinstance(value, dict):
-        return [text for item in value.values() for text in strings(item, depth)]
+        found = [text for item in value.values() for text in strings(item, keys, depth)]
+        return [*value, *found] if keys else found
     if isinstance(value, list):
-        return [text for item in value for text in strings(item, depth)]
+        return [text for item in value for text in strings(item, keys, depth)]
     return []
 
 
 def payloads_and_text(value: Any, depth: int = 0) -> Iterator[tuple[dict[str, Any] | None, str]]:
-    """Each gate payload (an object with an `error` field) and each other string in a result."""
+    """Each gate payload (an object with an `error` field) and each other string or key in a
+    result."""
     if isinstance(value, dict) and "error" in value:
         yield value, ""
     elif isinstance(value, dict):
-        for item in value.values():
+        for key, item in value.items():
+            yield None, key
             yield from payloads_and_text(item, depth)
     elif isinstance(value, list):
         for item in value:
@@ -178,6 +183,8 @@ def load(path: Path) -> dict[str, Any]:
     for section in SECTIONS:
         if section not in capture:
             raise Unusable(f"{section} is missing")
+    if not strings(capture["tool_listing"], keys=True):
+        raise Unusable("tool_listing holds no text")
     return capture
 
 
@@ -200,7 +207,7 @@ def report(rules: Rules, capture: dict[str, Any]) -> tuple[list[str], bool]:
         leaked = rules.leaks(value)
         unpermitted = rules.unpermitted(section, value, static)
         if leaked:
-            lines.append(f"{section}: leak ({leaked} fragments)")
+            lines.append(f"{section}: leak ({leaked} matches)")
         if unpermitted:
             lines.append(f"{section}: not permitted ({unpermitted} findings)")
         if leaked or unpermitted:

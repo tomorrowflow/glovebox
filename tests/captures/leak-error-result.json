@@ -4,7 +4,7 @@
     "version": "0.0.0",
     "presentation": "Hands the model the tool definitions as listed and each result's structured content as JSON."
   },
-  "static_text": ["text"],
+  "static_text": ["type", "text"],
   "tool_listing": [
     {
       "name": "list_topics",
