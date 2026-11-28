@@ -67,19 +67,37 @@ class Examined(NamedTuple):
     undeclared: list[str]
 
 
-def words(text: str, placeholders: bool = False) -> list[tuple[str, int, int]]:
-    """The words of `text` with their spans: lower case, split at `_`, punctuation and
-    camelCase, so that a client's renaming of an identifier keeps its words."""
-    found: list[tuple[str, int, int]] = []
+class Word(NamedTuple):
+    """A word of a text, lower case, and where it stands in it."""
+
+    text: str
+    start: int
+    end: int
+
+
+def is_hex_value(word: str) -> bool:
+    """Whether `word` is a hex string that a `{hex}` placeholder stands for. One whose bytes
+    read as printable ASCII is hex-encoded text, not an ID or a hash, and is refused."""
+    if not re.fullmatch(HEX, word):
+        return False
+    if len(word) % 2:
+        return True
+    return not all(0x20 <= byte < 0x7F for byte in bytes.fromhex(word))
+
+
+def words(text: str, placeholders: bool = False) -> list[Word]:
+    """The words of `text`: lower case, split at `_`, punctuation and camelCase, so that a
+    client's renaming of an identifier keeps its words."""
+    found: list[Word] = []
     for match in WORD.finditer(text):
         word, start = match.group(), match.start()
         if word == HEX_MARK:
             if placeholders:
-                found.append((word, start, match.end()))
+                found.append(Word(word, start, match.end()))
             continue
         cuts = [0, *(cut.start() for cut in CAMEL.finditer(word)), len(word)]
         for first, last in zip(cuts, cuts[1:], strict=False):
-            found.append((word[first:last].lower(), start + first, start + last))
+            found.append(Word(word[first:last].lower(), start + first, start + last))
     return found
 
 
@@ -93,35 +111,43 @@ class Vocabulary:
             if sequence:
                 self._by_first.setdefault(sequence[0], []).append(sequence)
 
-    def _covering(self, found: list[tuple[str, int, int]], at: int) -> int:
+    def _covering(self, found: list[Word], at: int) -> int:
         """The length of the longest allowed sequence that `found` starts with at `at`."""
-        word = found[at][0]
+        word = found[at].text
         candidates = self._by_first.get(word, [])
-        if re.fullmatch(HEX, word):
+        if is_hex_value(word):
             candidates = [*candidates, *self._by_first.get(HEX_MARK, [])]
         for sequence in sorted(candidates, key=len, reverse=True):
             tail = found[at : at + len(sequence)]
             if len(tail) == len(sequence) and all(
-                wanted == seen or (wanted == HEX_MARK and re.fullmatch(HEX, seen))
-                for wanted, (seen, _, _) in zip(sequence, tail, strict=True)
+                wanted == seen.text or (wanted == HEX_MARK and is_hex_value(seen.text))
+                for wanted, seen in zip(sequence, tail, strict=True)
             ):
                 return len(sequence)
         return 0
 
-    def mask(self, text: str) -> tuple[str, bool]:
-        """`text` with its covered words blanked, and whether any word was left."""
+    def mask(self, text: str) -> tuple[str, list[str]]:
+        """`text` with its covered words blanked, and the words that were left, as written."""
         found = words(text)
         characters = list(text)
-        left = False
+        left: list[str] = []
+        previous_end = -1
         at = 0
         while at < len(found):
-            length = self._covering(found, at) or (1 if found[at][0].isdigit() else 0)
+            length = self._covering(found, at) or (1 if found[at].text.isdigit() else 0)
             if not length:
-                left = True
+                word = found[at]
+                written = text[word.start : word.end]
+                # Parts of one identifier, `pleaseMail`, are one word left over.
+                if left and text[previous_end : word.start] in ("", "_"):
+                    left[-1] += text[previous_end : word.start] + written
+                else:
+                    left.append(written)
+                previous_end = word.end
                 at += 1
                 continue
-            for _, start, end in found[at : at + length]:
-                characters[start:end] = " " * (end - start)
+            for word in found[at : at + length]:
+                characters[word.start : word.end] = " " * (word.end - word.start)
             at += length
         return "".join(characters), left
 
@@ -134,7 +160,7 @@ class Declared:
         self.wrappers = wrappers
         self._patterns = [wrapper_pattern(item["prefix"], item["suffix"]) for item in wrappers]
         self.vocabulary_sequences = [
-            [word for word, _, _ in words(text, placeholders=True)] for text in static_text
+            [word.text for word in words(text, placeholders=True)] for text in static_text
         ]
 
     def texts(self) -> list[str]:
@@ -148,7 +174,10 @@ class Declared:
         """What sits between a declared prefix and suffix, if `text` is wrapped."""
         for pattern in self._patterns:
             match = pattern.fullmatch(text.strip())
-            if match:
+            if match is None:
+                continue
+            identifier = match.group("id") if "id" in pattern.groupindex else None
+            if identifier is None or is_hex_value(identifier):
                 return match.group("body")
         return None
 
@@ -225,7 +254,7 @@ class Rules:
         ]
         self.outputs = [Output, *(spec.output for spec in SPECS.values())]
         self.tool_sequences = [
-            [word for word, _, _ in words(text)]
+            [word.text for word in words(text)]
             for spec in SPECS.values()
             for text in strings(
                 spec.definition.model_dump(by_alias=True, exclude_none=True), keys=True
@@ -265,29 +294,33 @@ class Rules:
         derived: list[str] = []
         undeclared: list[str] = []
         unpermitted = 0
-        payloads = False
+        saw_payload = False
         for part in declared.parts(value, payloads=not listing):
             if part.payload is not None:
-                payloads = True
+                saw_payload = True
                 if not self.permits(part.payload):
                     unpermitted += 1
-                derived += [json.dumps(part.payload, ensure_ascii=a) for a in (True, False)]
-                derived += strings(part.payload)
+                derived += [*dumps(part.payload), *strings(part.payload)]
                 continue
             masked, left = vocabulary.mask(part.text)
             if left:
                 unpermitted += 1
                 derived.append(masked)
-                undeclared.append(" ".join(masked.split()))
-        everything = [json.dumps(value, ensure_ascii=a) for a in (True, False)] + strings(value)
+                undeclared.append(" ".join(left))
+        everything = [*dumps(value), *strings(value)]
         leaked = self.whole_matches([t.lower() for t in everything])
         leaked += self.fragment_matches([t.lower() for t in derived])
-        return Examined(leaked, unpermitted, listing or payloads, undeclared)
+        return Examined(leaked, unpermitted, listing or saw_payload, undeclared)
 
     def declared_text(self, declared: Declared) -> tuple[int, int]:
         """The whole corpus or cast strings, and the corpus fragments, in declared text."""
         texts = [text.lower() for text in declared.texts()]
         return self.whole_matches(texts), self.fragment_matches(texts)
+
+
+def dumps(value: Any) -> list[str]:
+    """`value` as JSON text, with and without escaping non-ASCII characters."""
+    return [json.dumps(value, ensure_ascii=ascii_only) for ascii_only in (True, False)]
 
 
 def forms(text: str) -> list[str]:
