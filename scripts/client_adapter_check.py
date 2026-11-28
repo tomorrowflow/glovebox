@@ -92,15 +92,13 @@ class Vocabulary:
         for sequence in sequences:
             if sequence:
                 self._by_first.setdefault(sequence[0], []).append(sequence)
-        for candidates in self._by_first.values():
-            candidates.sort(key=len, reverse=True)
 
     def _covering(self, found: list[tuple[str, int, int]], at: int) -> int:
         """The length of the longest allowed sequence that `found` starts with at `at`."""
         word = found[at][0]
-        candidates = list(self._by_first.get(word, []))
+        candidates = self._by_first.get(word, [])
         if re.fullmatch(HEX, word):
-            candidates += self._by_first.get(HEX_MARK, [])
+            candidates = [*candidates, *self._by_first.get(HEX_MARK, [])]
         for sequence in sorted(candidates, key=len, reverse=True):
             tail = found[at : at + len(sequence)]
             if len(tail) == len(sequence) and all(
@@ -271,7 +269,8 @@ class Rules:
         for part in declared.parts(value, payloads=not listing):
             if part.payload is not None:
                 payloads = True
-                unpermitted += not self.permits(part.payload)
+                if not self.permits(part.payload):
+                    unpermitted += 1
                 derived += [json.dumps(part.payload, ensure_ascii=a) for a in (True, False)]
                 derived += strings(part.payload)
                 continue
