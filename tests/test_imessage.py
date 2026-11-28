@@ -30,7 +30,14 @@ import pytest
 
 from glovebox import chatdb
 from glovebox.access import Access
-from tests.client import ACCOUNTS_TOOL, COUNT_TOOL, GROUP_TOOL, LIST_TOOL, agent_client
+from tests.client import (
+    ACCOUNTS_TOOL,
+    ALL_TOOLS,
+    COUNT_TOOL,
+    GROUP_TOOL,
+    LIST_TOOL,
+    agent_client,
+)
 from tests.conftest import GateStarter, RunningGate, clean_environment, free_port, operator
 from tests.hostile import CORPUS, assert_no_corpus, observe_gate
 from tests.test_failures import HOSTILE_BODY, account_of
@@ -269,7 +276,7 @@ async def test_the_gate_only_ever_reads_the_bridge_with_get(
 
     assert len(bridge.requests) == 5
     assert {(method, path) for method, path, _ in bridge.requests} == {("GET", "/")}
-    assert names == [ACCOUNTS_TOOL, LIST_TOOL, COUNT_TOOL, GROUP_TOOL, "list_topics"]
+    assert names == ALL_TOOLS
 
 
 # --- authentication between bridge and gate --------------------------------------------------

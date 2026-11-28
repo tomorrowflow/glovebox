@@ -46,6 +46,10 @@ TopicId = Annotated[
 YesNoUnknown = Literal["yes", "no", "unknown"]
 # How far a classification got: every field valid, some valid, none valid, or no answer.
 ClassificationStatus = Literal["classified", "partial", "invalid", "unavailable"]
+# Whether a calendar event holds the operator's time. `busy`: it does. `tentative`: it may.
+# `free`: it does not (cancelled, declined or marked as free time). `unknown`: the source said
+# something outside this vocabulary, which is never taken to mean free.
+BusyStatus = Literal["busy", "tentative", "free", "unknown"]
 # A deadline is a minute timestamp, or `unknown`.
 Deadline = Minute | Literal["unknown"]
 # "0" to "1000", or "1000+" for anything above the cap.

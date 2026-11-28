@@ -69,12 +69,22 @@ create table if not exists items (
     config_digest text not null
 );
 create index if not exists items_by_received on items (received desc, item_handle);
+create table if not exists events (
+    event_handle text primary key,
+    account_handle text not null,
+    start_time text not null,
+    end_time text not null,
+    all_day integer not null,
+    busy_status text not null
+);
+create index if not exists events_by_start on events (start_time, event_handle);
 create table if not exists sync_state (
     account_handle text primary key,
     source_kind text not null,
     status text not null,
     last_sync text not null,
-    skipped integer not null default 0
+    skipped integer not null default 0,
+    coverage_end text not null default ''
 );
 """
 
@@ -95,6 +105,10 @@ def prepare(path: Path) -> None:
         columns = {row[1] for row in database.execute("pragma table_info(sync_state)")}
         if "skipped" not in columns:
             database.execute("alter table sync_state add column skipped integer not null default 0")
+        if "coverage_end" not in columns:
+            database.execute(
+                "alter table sync_state add column coverage_end text not null default ''"
+            )
 
 
 def _drop_items_without_semantic_fields(database: sqlite3.Connection) -> None:

@@ -7,8 +7,7 @@ SeeCode JSON specs that describe the system. They are the source of truth for ag
 | `overview.json` | `high-level` | The whole system for a non-engineer |
 | `glovebox.json` | `architecture` | `src/glovebox`: entry point, MCP server and ASGI app |
 | `classifier.json` | `architecture` | The quarantined classifier: what it receives, what is validated, what is cached |
-
-No `deployment.json` yet: the repo has no compose file or Dockerfile. Add one when deployment code lands.
+| `deployment.json` | `deployment` | Where Glovebox runs: the throwaway Compose stack (gate, standins, seed), plus the native test and production tiers on the Mac mini |
 
 ## Rules
 

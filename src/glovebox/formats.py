@@ -28,7 +28,9 @@ MAX_TOPICS = 32
 
 # Limits that bound side channels (ADR 0001).
 WINDOW_DAYS = 30  # mail is neither ingested nor served beyond this
-MAX_ITEMS = 50  # items or groups in one response
+LOOK_AHEAD_DAYS = 90  # calendar events are neither ingested nor served beyond this
+MAX_EVENTS = 2000  # events kept for one calendar account; later ones count as skipped
+MAX_ITEMS = 50  # items, events, windows or groups in one response
 MAX_ACCOUNTS = 50  # accounts one token covers, so one response lists them all
 COUNT_CAP = 1000  # a count above this is reported as COUNT_CAPPED
 

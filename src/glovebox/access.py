@@ -28,6 +28,9 @@ LIST_OPERATION = "list_items"
 COUNT_OPERATION = "count_items"
 GROUP_OPERATION = "group_items"
 LIST_TOPICS_OPERATION = "list_topics"
+AVAILABILITY_OPERATION = "get_availability"
+LIST_EVENTS_OPERATION = "list_events"
+LIST_OVERLAPS_OPERATION = "list_overlaps"
 # The read operations a token can be limited to; one name per read tool.
 OPERATIONS = (
     LIST_ACCOUNTS_OPERATION,
@@ -35,6 +38,9 @@ OPERATIONS = (
     COUNT_OPERATION,
     GROUP_OPERATION,
     LIST_TOPICS_OPERATION,
+    AVAILABILITY_OPERATION,
+    LIST_EVENTS_OPERATION,
+    LIST_OVERLAPS_OPERATION,
 )
 
 ACCOUNT_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
@@ -149,7 +155,7 @@ class Access:
             account = _account_named(database, name)
             if account is None:
                 raise AccessError(f"no account named {name}")
-            for table in ("items", "sync_state", "token_accounts"):
+            for table in ("items", "events", "sync_state", "token_accounts"):
                 database.execute(f"delete from {table} where account_handle = ?", (account.handle,))
             database.execute("delete from accounts where handle = ?", (account.handle,))
 
