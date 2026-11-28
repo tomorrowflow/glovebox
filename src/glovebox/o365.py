@@ -236,10 +236,9 @@ class O365CalendarSource:
         skipped = 0
         for all_day, raws in ((False, in_utc), (True, in_zone)):
             for raw in raws:
-                flag = all_day_flag(raw) if isinstance(raw, Mapping) else None
-                if flag is None or not isinstance(raw, Mapping):
-                    # Counted once, with the timed events.
-                    skipped += not all_day
+                if not isinstance(raw, Mapping) or (flag := all_day_flag(raw)) is None:
+                    if not all_day:  # counted once, with the timed events
+                        skipped += 1
                     continue
                 if flag != all_day:
                     continue
