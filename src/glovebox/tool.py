@@ -30,6 +30,7 @@ from glovebox.classification import QuarantinedClassifier
 from glovebox.classifier_config import ClassifierConfig
 from glovebox.credentials import CredentialsError
 from glovebox.formats import MAX_ITEMS
+from glovebox.imapmail import DEFAULT_READ_DEADLINE
 from glovebox.output import (
     AccountsOutput,
     AvailabilityOutput,
@@ -262,8 +263,10 @@ class ReadTool:
         classifier_for: Callable[[str], QuarantinedClassifier],
         config: ClassifierConfig,
         imessage_max_silence: timedelta | None = None,
+        mailbox_read_deadline: timedelta = DEFAULT_READ_DEADLINE,
     ) -> None:
         self._imessage_max_silence = imessage_max_silence
+        self._mailbox_read_deadline = mailbox_read_deadline
         self._store = store
         self._access = access
         self._clock = clock
@@ -352,7 +355,11 @@ class ReadTool:
             fetched, failed = self._read_accounts(
                 selected,
                 lambda account: open_source(
-                    account.kind, account.source, account.credentials, self._imessage_max_silence
+                    account.kind,
+                    account.source,
+                    account.credentials,
+                    self._imessage_max_silence,
+                    self._mailbox_read_deadline,
                 ).fetch(window_start(now), now),
             )
             for account, mailbox in fetched:

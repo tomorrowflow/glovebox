@@ -6,10 +6,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from glovebox.imapmail import DEFAULT_READ_DEADLINE
+
 DEFAULT_DB = "glovebox.db"
 MAX_SILENCE_VAR = "GLOVEBOX_IMESSAGE_MAX_SILENCE_HOURS"
 MAX_SILENCE_DIGITS = 6  # up to 999999 hours, far beyond any window
 DEFAULT_IMESSAGE_MAX_SILENCE = timedelta(hours=72)
+READ_DEADLINE_VAR = "GLOVEBOX_MAILBOX_READ_DEADLINE_SECONDS"
+MAX_READ_DEADLINE_SECONDS = 3600
 # One Host header value, spelled out: a DNS name or an IPv4 address, or a bracketed IPv6
 # address, then optionally a port. No wildcard is expressible.
 HOST_PATTERN = re.compile(
@@ -43,6 +47,9 @@ class Settings:
     # account is `stale`; None turns the check off. A database stays readable when Messages
     # stops syncing, so silence is the only sign of it the gate can see.
     imessage_max_silence: timedelta | None = DEFAULT_IMESSAGE_MAX_SILENCE
+    # How long one read of the mailbox.org inbox may take, from start to logout: a read that
+    # is not done by then is an outage. The whole window is read, so a large inbox needs more.
+    mailbox_read_deadline: timedelta = DEFAULT_READ_DEADLINE
 
     def clock(self) -> Callable[[], datetime]:
         fixed = self.fixed_now
@@ -60,7 +67,23 @@ class Settings:
             fixed_now=parse_fixed_now(env.get("GLOVEBOX_FIXED_NOW")),
             allowed_hosts=parse_allowed_hosts(env.get("GLOVEBOX_ALLOWED_HOSTS")),
             imessage_max_silence=parse_max_silence(env.get(MAX_SILENCE_VAR)),
+            mailbox_read_deadline=parse_read_deadline(env.get(READ_DEADLINE_VAR)),
         )
+
+
+def parse_read_deadline(value: str | None) -> timedelta:
+    """The time limit of one mailbox read in whole seconds; unset is the default."""
+    if value is None or not value.strip():
+        return DEFAULT_READ_DEADLINE
+    text = value.strip()
+    digits = len(str(MAX_READ_DEADLINE_SECONDS))
+    seconds = int(text) if text.isascii() and text.isdigit() and len(text) <= digits else 0
+    if not 1 <= seconds <= MAX_READ_DEADLINE_SECONDS:
+        raise ConfigError(
+            f"{READ_DEADLINE_VAR} must be a whole number of seconds, "
+            f"1 to {MAX_READ_DEADLINE_SECONDS}"
+        )
+    return timedelta(seconds=seconds)
 
 
 def parse_max_silence(value: str | None) -> timedelta | None:

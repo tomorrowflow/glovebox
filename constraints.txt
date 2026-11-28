@@ -9,6 +9,7 @@ h11==0.16.0
 httpcore2==2.16.2
 httpx2==2.16.2
 idna==3.20
+imapclient==4.3.0
 iniconfig==2.3.1
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1

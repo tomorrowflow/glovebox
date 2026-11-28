@@ -14,10 +14,18 @@ from pathlib import Path
 from typing import TextIO
 from urllib.parse import urlsplit
 
+from glovebox import imapmail
 from glovebox.access import OPERATIONS, Access, AccessError
 from glovebox.config import ConfigError, Settings
 from glovebox.credentials import CredentialsError, read_credentials
-from glovebox.sources import BEARER_KINDS, SOURCE_KINDS, bridge_problem
+from glovebox.sources import (
+    BEARER_KINDS,
+    HTTP_SCHEMES,
+    IMAP_SCHEMES,
+    MAILBOX_ORG_KIND,
+    SOURCE_KINDS,
+    bridge_problem,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -49,7 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     add = account_commands.add_parser("add", help="add an account")
     add.add_argument("name", help="the operator's own label; agents never see it")
     add.add_argument("--kind", required=True, choices=SOURCE_KINDS)
-    add.add_argument("--source", required=True, help="a file path or an http(s) URL")
+    add.add_argument(
+        "--source",
+        required=True,
+        help="a file path, an http(s) URL, or imaps://HOST for a mailbox.org mail account",
+    )
     add.add_argument("--credentials", type=Path, help="file holding the upstream credentials")
     account_commands.add_parser("list", help="list accounts")
     remove = account_commands.add_parser("remove", help="remove an account and its stored items")
@@ -89,13 +101,25 @@ def run(argv: Sequence[str], env: Mapping[str, str], out: TextIO, err: TextIO) -
 def _account(args: argparse.Namespace, access: Access, out: TextIO) -> int:
     if args.action == "add":
         source = _checked_source(args.source)
+        secret = None
         if args.credentials is not None:
             # Refuse a file that is open to others now, not at the first request.
-            read_credentials(args.credentials)
-        if args.kind in BEARER_KINDS and urlsplit(source).scheme in ("http", "https"):
+            secret = read_credentials(args.credentials)
+        if args.kind in BEARER_KINDS and urlsplit(source).scheme in HTTP_SCHEMES:
             problem = bridge_problem(source, args.credentials is not None)
             if problem is not None:
                 raise AccessError(problem)
+        if args.kind == MAILBOX_ORG_KIND:
+            problem = imapmail.location_problem(source)
+            if problem is None and secret is not None and imapmail.login_of(secret) is None:
+                problem = (
+                    "the credentials file holds the mailbox.org user name on its first line "
+                    "and the password on its second, and nothing else"
+                )
+            if problem is not None:
+                raise AccessError(problem)
+        elif urlsplit(source).scheme in IMAP_SCHEMES:
+            raise AccessError(f"an IMAP source is for the {MAILBOX_ORG_KIND} kind")
         account = access.add_account(args.name, args.kind, source, args.credentials)
         print(f"added account {account.name} with handle {account.handle}", file=out)
     elif args.action == "list":
@@ -154,7 +178,7 @@ def _token(args: argparse.Namespace, access: Access, out: TextIO, err: TextIO) -
 def _checked_source(source: str) -> str:
     """A URL without anything that could be a credential, or an absolute file path."""
     parts = urlsplit(source)
-    if parts.scheme in ("http", "https"):
+    if parts.scheme in (*HTTP_SCHEMES, *IMAP_SCHEMES):
         if parts.username or parts.password or parts.query or parts.fragment:
             raise AccessError("keep credentials out of the source URL; use --credentials")
         return source
