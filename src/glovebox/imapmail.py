@@ -429,8 +429,8 @@ def _thread_of(message: EmailMessage) -> str:
 def _normalised_id(identifier: str) -> str:
     """A message ID spelled one way: its domain lowercased, its local part as it is, since
     only the domain is case-insensitive (RFC 5322, 3.6.4)."""
-    local, at, domain = identifier.rpartition("@")
-    return f"{local}@{domain.lower()}" if at else identifier
+    local, separator, domain = identifier.rpartition("@")
+    return f"{local}@{domain.lower()}" if separator else identifier
 
 
 def has_attachment(structure: Any, related: bool = False) -> bool:
