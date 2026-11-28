@@ -14,9 +14,14 @@ LIST_TOOL = "list_items"
 COUNT_TOOL = "count_items"
 GROUP_TOOL = "group_items"
 TOPICS_TOOL = "list_topics"
+AVAILABILITY_TOOL = "get_availability"
+EVENTS_TOOL = "list_events"
+OVERLAPS_TOOL = "list_overlaps"
 # The tools that read items, which need a source; `list_accounts` and `list_topics` do not.
 READ_TOOLS = [LIST_TOOL, COUNT_TOOL, GROUP_TOOL]
-ALL_TOOLS = [ACCOUNTS_TOOL, *READ_TOOLS, TOPICS_TOOL]
+# The tools that read calendar events.
+CALENDAR_TOOLS = [AVAILABILITY_TOOL, EVENTS_TOOL, OVERLAPS_TOOL]
+ALL_TOOLS = [ACCOUNTS_TOOL, *READ_TOOLS, TOPICS_TOOL, *CALENDAR_TOOLS]
 
 
 @asynccontextmanager
