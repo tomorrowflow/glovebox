@@ -220,23 +220,47 @@ class O365CalendarSource:
         self._credentials = credentials
 
     def fetch_events(self, now: datetime) -> SourceCalendar:
+        """The calendar's events, timed ones from a view in UTC and all-day ones from a view in
+        the calendar's own zone.
+
+        A local wall time is ambiguous in the hour that repeats when summer time ends, so a
+        timed event is read as the UTC instant Graph gives. An all-day event is a date, and
+        Graph gives its midnights in the zone it is asked for.
+        """
         login = read_login(self._credentials)
         token = self._access_token(login)
-        window_start, window_end = look_ahead(now)
-        url = self._calendar_view(window_start, window_end)
-        headers = {"Prefer": f'outlook.timezone="{login.timezone.key}"'}
+        zone = login.timezone
+        in_utc = self._read_view(token, now, "UTC")
+        in_zone = in_utc if zone.key == "UTC" else self._read_view(token, now, zone.key)
         events: list[SourceEvent] = []
         skipped = 0
-        for _ in range(MAX_PAGES):
-            page = DocumentReader(url, token, headers).read_document(self._parse_page)
-            for raw in page.values:
-                event = parse_event(raw, login.timezone)
+        for all_day, raws in ((False, in_utc), (True, in_zone)):
+            for raw in raws:
+                flag = all_day_flag(raw) if isinstance(raw, Mapping) else None
+                if flag is None or not isinstance(raw, Mapping):
+                    # Counted once, with the timed events.
+                    skipped += not all_day
+                    continue
+                if flag != all_day:
+                    continue
+                event = parse_event(raw, zone, all_day)
                 if event is None:
                     skipped += 1
                 elif clip_to_look_ahead(event.start, event.end, now) is not None:
                     events.append(event)
+        return SourceCalendar(events=identified(events), skipped=skipped)
+
+    def _read_view(self, token: Secret, now: datetime, zone: str) -> list[object]:
+        """Every event of the look-ahead, as Graph gives it with times in `zone`."""
+        window_start, window_end = look_ahead(now)
+        url = self._calendar_view(window_start, window_end)
+        headers = {"Prefer": f'outlook.timezone="{zone}"'}
+        values: list[object] = []
+        for _ in range(MAX_PAGES):
+            page = DocumentReader(url, token, headers).read_document(self._parse_page)
+            values += page.values
             if page.next_link is None:
-                return SourceCalendar(events=identified(events), skipped=skipped)
+                return values
             url = page.next_link
         raise SourceError
 
@@ -319,24 +343,32 @@ def open_o365_calendar(location: str, credentials: Path | None) -> CalendarSourc
     return O365CalendarSource(location, credentials)
 
 
-def parse_event(raw: object, zone: ZoneInfo) -> SourceEvent | None:
-    """One occurrence as the gate keeps it, or None if it cannot be understood."""
-    if not isinstance(raw, Mapping):
+def all_day_flag(raw: Mapping[str, object]) -> bool | None:
+    """Whether an event is an all-day one, or None if its flag is not a boolean."""
+    flag = raw.get("isAllDay", False)
+    return flag if isinstance(flag, bool) else None
+
+
+def parse_event(raw: Mapping[str, object], zone: ZoneInfo, all_day: bool) -> SourceEvent | None:
+    """One occurrence as the gate keeps it, or None if it cannot be understood.
+
+    A timed event's times must be given in UTC; an all-day event's are its dates, in `zone`
+    (or UTC), `end` exclusive.
+    """
+    event_id = raw.get("id")
+    if not isinstance(event_id, str) or not event_id:
         return None
-    event_id, all_day = raw.get("id"), raw.get("isAllDay", False)
-    if not isinstance(event_id, str) or not event_id or not isinstance(all_day, bool):
-        return None
-    start, end = _local(raw.get("start"), zone), _local(raw.get("end"), zone)
+    zones: Mapping[str, tzinfo] = {"UTC": UTC, zone.key: zone} if all_day else {"UTC": UTC}
+    start, end = _moment(raw.get("start"), zones), _moment(raw.get("end"), zones)
     if start is None or end is None:
         return None
     if all_day:
-        # Dates, `end` exclusive, in the calendar's time zone.
         first, last = start.date(), end.date()
         if last <= first:
             return None
         begin, finish = midnight(first, zone), midnight(last, zone)
     else:
-        begin, finish = minute(start.astimezone(UTC)), minute(end.astimezone(UTC))
+        begin, finish = minute(start), minute(end)
         if finish <= begin:
             return None
     return SourceEvent(
@@ -348,26 +380,19 @@ def parse_event(raw: object, zone: ZoneInfo) -> SourceEvent | None:
     )
 
 
-def _local(value: object, zone: ZoneInfo) -> datetime | None:
-    """A Graph `dateTimeTimeZone` as an aware time. Graph answers in the zone it was asked for
-    (or UTC); a time in any other zone is not understood."""
+def _moment(value: object, zones: Mapping[str, tzinfo]) -> datetime | None:
+    """A Graph `dateTimeTimeZone` as an aware time. The zone it names must be one of `zones`;
+    a time in any other zone is not understood."""
     if not isinstance(value, Mapping):
         return None
     moment, name = value.get("dateTime"), value.get("timeZone")
-    if not isinstance(moment, str) or not isinstance(name, str):
-        return None
-    wall: tzinfo
-    if name == "UTC":
-        wall = UTC
-    elif name == zone.key:
-        wall = zone
-    else:
+    if not isinstance(moment, str) or not isinstance(name, str) or name not in zones:
         return None
     try:
         parsed = datetime.fromisoformat(moment)
     except ValueError:
         return None
-    return None if parsed.tzinfo is not None else parsed.replace(tzinfo=wall)
+    return None if parsed.tzinfo is not None else parsed.replace(tzinfo=zones[name])
 
 
 def busy_status(raw: Mapping[str, object]) -> BusyStatus:

@@ -101,6 +101,9 @@ class Script:
     """What the stand-in answers; a test changes it between calls."""
 
     events: list[object] = field(default_factory=list)
+    # Events for a request that asks for times in this zone (`Prefer: outlook.timezone`), where
+    # `events` is not what that zone would see: Graph answers in the zone it is asked for.
+    events_in_zone: dict[str, list[object]] = field(default_factory=dict)
     page_size: int = 100
     graph_status: int = 200
     graph_body: bytes | None = None  # answers every Graph request, whatever its status
@@ -249,8 +252,10 @@ class GraphStandIn:
             return self.script.graph_status, self._json({"error": {"code": "Failed"}})
         skip = int(parse_qs(query).get("skip", ["0"])[0])
         size = self.script.page_size
-        page: dict[str, object] = {"value": self.script.events[skip : skip + size]}
-        if skip + size < len(self.script.events):
+        asked = handler.headers.get("Prefer", "").removeprefix('outlook.timezone="').rstrip('"')
+        events = self.script.events_in_zone.get(asked, self.script.events)
+        page: dict[str, object] = {"value": events[skip : skip + size]}
+        if skip + size < len(events):
             link_base = self.script.next_link_base or self.graph
             page["@odata.nextLink"] = f"{link_base}/me/calendarView?skip={skip + size}"
         return 200, self._json(page)

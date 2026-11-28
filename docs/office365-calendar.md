@@ -8,8 +8,10 @@ The gate signs in to the work account as the operator, once, with the OAuth devi
 
 ```
 GET https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=…&endDateTime=…&$select=…
-Prefer: outlook.timezone="<the calendar's IANA zone>"
+Prefer: outlook.timezone="UTC"
 ```
+
+It is read twice, with a different `Prefer` header. **Timed events** are read from the view in `UTC`: a local wall time is ambiguous in the hour that repeats when summer time ends (in Berlin, 02:00 to 03:00 on the last Sunday of October happens twice), so the gate takes the UTC instant Graph gives and never guesses between the two. **All-day events** are read from a second view with `Prefer: outlook.timezone="<the calendar's IANA zone>"`, because an all-day event is a date and Graph gives its midnights in the zone it is asked for. With a calendar in `UTC` one view serves both. Each view's events of the other kind are ignored.
 
 Graph expands recurring series into their occurrences and applies exceptions and cancellations itself, so the gate stores single occurrences and does no recurrence arithmetic for this source. Only `id`, `start`, `end`, `isAllDay`, `isCancelled`, `showAs` and `responseStatus` are selected; subjects, bodies, locations, attendees, organizers and links are never requested, and an event ID is read only for its handle.
 
@@ -61,7 +63,7 @@ Withdrawing consent later has the same effect on a running gate: the next refres
 
 The command prints a short code and an address. Open the address in a browser signed in as the work account, enter the code and approve. It then writes the credentials file, mode `0600`, in a directory only the gateway's user may use. Run it again to sign in anew, for example after consent was withdrawn and granted again. If the sign-in would grant a write permission, nothing is saved and the command says so.
 
-`--timezone` is the calendar's IANA time zone (default `UTC`). It tells Graph which zone to answer in, and it is where an all-day event's midnights are: an all-day event spans local midnights in that zone, so it is 23 or 25 hours long on a daylight-saving change. Use the zone the work calendar is set to in Outlook.
+`--timezone` is the calendar's IANA time zone (default `UTC`). It tells Graph which zone to answer in for all-day events (timed events are always read in UTC), and it is where an all-day event's midnights are: an all-day event spans local midnights in that zone, so it is 23 or 25 hours long on a daylight-saving change. Use the zone the work calendar is set to in Outlook.
 
 ### 3. Add the account and a token
 
@@ -81,8 +83,7 @@ The credentials file is a JSON object: `client_id`, `tenant_id`, `timezone`, the
 - The default calendar of the signed-in user. Other calendars, shared calendars and delegated mailboxes are not read.
 - Events overlapping the 90-day look-ahead from the gate's clock, one row per occurrence, up to 100 per page and 100 pages, then the account is `stale` (the response is not a calendar the gate can vouch for). The store keeps at most 2000 events per account; the time after the first dropped event is `unknown`, never `free` (see `AGENTS.md`).
 - `busy_status` combines three things Graph says. `showAs`: `busy` and `oof` are `busy`, `tentative` is `tentative`, `free` and `workingElsewhere` are `free`, and `unknown` (or anything else) makes the status `unknown`. The operator's answer: `none`, `organizer` and `accepted` are `busy`, `tentativelyAccepted` and `notResponded` are `tentative`, `declined` is `free`. `isCancelled` makes the event `free`. If any one of them is free, the event is `free`; if any is outside this vocabulary, it is `unknown`; otherwise `tentative` if any says so, else `busy`.
-- A time Graph gives in a zone other than the one asked for (or UTC), an unreadable time, an end that is not after the start, a non-boolean all-day flag and a non-object entry are skipped and counted: the account is `incomplete`.
-- Known limit: Graph answers in the calendar's zone as local times, so an event that starts in the hour that repeats when summer time ends is read as its first occurrence. Check it if a calendar has events in that hour.
+- A timed event whose times are not in UTC (so, if Graph ignored the request, one that could be either instant in a repeated hour), an all-day event in neither UTC nor the calendar's zone, an unreadable time, an end that is not after the start, a non-boolean all-day flag and a non-object entry are skipped and counted: the account is `incomplete`. An event that crosses the end of summer time, with an end that is earlier on the clock than its start, is kept: the gate works in instants.
 
 ## Failures
 
@@ -111,4 +112,4 @@ Not run yet. The operator, with the employer's consent in hand:
 4. Create a new event in Outlook and confirm it shows up at the next call.
 5. Record the result on the ticket. If consent was not granted, or the tenant blocks the sign-in, record the source as `blocked` with the reason; the ticket closes as blocked, not as delivered.
 
-Unverified until then, and the things to look at if the run disagrees: that Graph accepts the IANA zone name in `Prefer: outlook.timezone` and answers in it (an event in any other zone is skipped and the account is `incomplete`), and that `Calendars.Read` returns `showAs` and `responseStatus` (the narrower `Calendars.ReadBasic` was not tried, and may leave out what the gate needs).
+Unverified until then, and the things to look at if the run disagrees: that Graph accepts `UTC` and the IANA zone name in `Prefer: outlook.timezone` and answers in them (an event in any other zone is skipped and the account is `incomplete`), and that an all-day event in the zone's view has its midnights in that zone; check an all-day event and an event around the last Sunday of October, and that `Calendars.Read` returns `showAs` and `responseStatus` (the narrower `Calendars.ReadBasic` was not tried, and may leave out what the gate needs).

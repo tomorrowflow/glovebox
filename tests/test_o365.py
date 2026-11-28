@@ -134,6 +134,7 @@ def work_gate(
     edit: Callable[[dict[str, Any]], None] | None = None,
     also: Mapping[str, Path] | None = None,
     db: str = "glovebox.db",
+    now: str | None = None,
 ) -> Iterator[tuple[RunningGate, Path]]:
     """A gate with the work calendar account `work` (and `also`, fixture calendars by name),
     and its credentials file, a copy of the operator's sign-in that `edit` may change."""
@@ -168,6 +169,7 @@ def work_gate(
             **{f"{name}-only": [name] for name in accounts},
         },
         extra_env=trust(certificate),
+        **({} if now is None else {"now": now}),
     ) as gate:
         yield gate, credentials
 
@@ -275,19 +277,35 @@ async def test_recurring_all_day_and_answered_events_become_busy_and_free_time(
     certificate: Path,
 ) -> None:
     berlin = "Europe/Berlin"
+    # Timed events come in UTC: 09:00 in Berlin is 08:00 UTC in winter.
     graph.script.events = [
         # Graph expands a series into its occurrences; each has an ID of its own.
         *[
             graph_event(
                 f"series-{n}",
+                f"2026-01-{day:02d}T08:00:00",
                 f"2026-01-{day:02d}T09:00:00",
-                f"2026-01-{day:02d}T10:00:00",
-                berlin,
                 type="occurrence",
                 seriesMasterId="AAMk-series",
             )
             for n, day in enumerate((12, 19, 26))
         ],
+        graph_event("cancelled", "2026-01-14T08:00:00", "2026-01-14T09:00:00")
+        | {"isCancelled": True},
+        graph_event("tentative", "2026-01-15T08:00:00", "2026-01-15T09:00:00")
+        | {"showAs": "tentative"},
+        graph_event("elsewhere", "2026-01-16T08:00:00", "2026-01-16T09:00:00")
+        | {"showAs": "workingElsewhere"},
+        graph_event("declined", "2026-01-17T08:00:00", "2026-01-17T09:00:00")
+        | {"responseStatus": {"response": "declined"}},
+        graph_event("not-answered", "2026-01-18T08:00:00", "2026-01-18T09:00:00")
+        | {"responseStatus": {"response": "notResponded"}},
+        graph_event("unknown", "2026-01-19T11:00:00", "2026-01-19T12:00:00")
+        | {"showAs": "unknown"},
+        # An all-day event in the UTC view is not read from it: its dates are the calendar's.
+        graph_event("holiday", "2026-03-28T23:00:00", "2026-03-29T22:00:00", isAllDay=True),
+    ]
+    graph.script.events_in_zone[berlin] = [
         # All day on the day Berlin changes to summer time: 23 hours, between local midnights.
         graph_event(
             "holiday",
@@ -297,19 +315,8 @@ async def test_recurring_all_day_and_answered_events_become_busy_and_free_time(
             isAllDay=True,
             showAs="oof",
         ),
-        graph_event("cancelled", "2026-01-14T09:00:00", "2026-01-14T10:00:00", berlin)
-        | {"isCancelled": True},
-        graph_event("tentative", "2026-01-15T09:00:00", "2026-01-15T10:00:00", berlin)
-        | {"showAs": "tentative"},
-        graph_event("elsewhere", "2026-01-16T09:00:00", "2026-01-16T10:00:00", berlin)
-        | {"showAs": "workingElsewhere"},
-        graph_event("declined", "2026-01-17T09:00:00", "2026-01-17T10:00:00", berlin)
-        | {"responseStatus": {"response": "declined"}},
-        graph_event("not-answered", "2026-01-18T09:00:00", "2026-01-18T10:00:00", berlin)
-        | {"responseStatus": {"response": "notResponded"}},
-        graph_event("unknown", "2026-01-19T12:00:00", "2026-01-19T13:00:00", berlin)
-        | {"showAs": "unknown"},
-        graph_event("in-utc", "2026-01-20T09:00:00", "2026-01-20T10:00:00", "UTC"),
+        # A timed event in the zone's view is not read from it.
+        graph_event("timed", "2026-01-21T09:00:00", "2026-01-21T10:00:00", berlin),
     ]
 
     def in_berlin(document: dict[str, Any]) -> None:
@@ -322,16 +329,18 @@ async def test_recurring_all_day_and_answered_events_become_busy_and_free_time(
         async with agent_client(gate) as client:
             listed = await events_of(client, limit=50)
 
-    assert graph.graph_requests()[0].headers["prefer"] == f'outlook.timezone="{berlin}"'
+    # Timed events are asked for in UTC, all-day ones in the calendar's own zone.
+    assert {r.headers["prefer"] for r in graph.graph_requests()} == {
+        'outlook.timezone="UTC"',
+        f'outlook.timezone="{berlin}"',
+    }
     by_start = {e["start"]: e for e in listed}
-    # Wall-clock 09:00 in Berlin is 08:00 UTC in winter.
+    assert len(listed) == 10
     assert [s for s in by_start if s.startswith("2026-01-12") or s.startswith("2026-01-26")] == [
         "2026-01-12T08:00Z",
         "2026-01-26T08:00Z",
     ]
-    assert (
-        len([e for e in listed if e["start"][11:] == "08:00Z" and e["busy_status"] == "busy"]) >= 3
-    )
+    assert "2026-01-21T08:00Z" not in by_start
     holiday = by_start["2026-03-28T23:00Z"]
     assert (holiday["end"], holiday["all_day"], holiday["busy_status"]) == (
         "2026-03-29T22:00Z",
@@ -345,9 +354,96 @@ async def test_recurring_all_day_and_answered_events_become_busy_and_free_time(
         "2026-01-17T08:00Z": "free",  # declined
         "2026-01-18T08:00Z": "tentative",  # not answered
         "2026-01-19T11:00Z": "unknown",
-        "2026-01-20T09:00Z": "busy",  # a time Graph gave in UTC
     }
     assert {start: by_start[start]["busy_status"] for start in statuses} == statuses
+
+
+@pytest.mark.anyio
+async def test_timed_events_keep_their_instant_across_the_end_of_summer_time(
+    start_gate: GateStarter,
+    tmp_path: Path,
+    graph: GraphStandIn,
+    signed_in: Path,
+    certificate: Path,
+) -> None:
+    """Berlin goes back from 03:00 CEST to 02:00 CET on 2026-10-25, so 02:00 to 03:00 local
+    time happens twice. As UTC instants, nothing about the repeated hour is ambiguous."""
+    berlin = "Europe/Berlin"
+    graph.script.events = [
+        graph_event("first-0230", "2026-10-25T00:30:00", "2026-10-25T00:45:00"),  # 02:30 CEST
+        graph_event(
+            "crossing", "2026-10-25T00:45:00", "2026-10-25T01:15:00"
+        ),  # 02:45 CEST to 02:15 CET
+        graph_event("second-0230", "2026-10-25T01:30:00", "2026-10-25T02:30:00"),  # 02:30 CET
+    ]
+    graph.script.events_in_zone[berlin] = [
+        # The day is 25 hours long: local midnight to local midnight.
+        graph_event("day", "2026-10-25T00:00:00", "2026-10-26T00:00:00", berlin, isAllDay=True),
+    ]
+
+    def in_berlin(document: dict[str, Any]) -> None:
+        document["timezone"] = berlin
+
+    with work_gate(
+        start_gate,
+        tmp_path,
+        graph,
+        signed_in,
+        certificate,
+        edit=in_berlin,
+        now="2026-10-20T12:00:00Z",
+    ) as (gate, _):
+        async with agent_client(gate) as client:
+            result = await call(client, EVENTS_TOOL, limit=50)
+
+    assert result["error"] == "none"
+    assert entry_of(result)["status"] == "current"
+    assert [(e["start"], e["end"], e["all_day"]) for e in result["events"]] == [
+        ("2026-10-24T22:00Z", "2026-10-25T23:00Z", True),
+        ("2026-10-25T00:30Z", "2026-10-25T00:45Z", False),
+        ("2026-10-25T00:45Z", "2026-10-25T01:15Z", False),
+        ("2026-10-25T01:30Z", "2026-10-25T02:30Z", False),
+    ]
+    # Timed events are asked for in UTC, never in a zone that has a repeated hour.
+    assert {r.headers["prefer"] for r in graph.graph_requests()} == {
+        'outlook.timezone="UTC"',
+        f'outlook.timezone="{berlin}"',
+    }
+
+
+@pytest.mark.anyio
+async def test_a_timed_event_given_in_a_local_zone_is_skipped_not_guessed(
+    start_gate: GateStarter,
+    tmp_path: Path,
+    graph: GraphStandIn,
+    signed_in: Path,
+    certificate: Path,
+) -> None:
+    """If Graph ignored the request for UTC, a wall time in the zone could be either of the two
+    instants in the repeated hour; the gate counts the event and does not pick one."""
+    berlin = "Europe/Berlin"
+    graph.script.events = [
+        graph_event("ambiguous", "2026-10-25T02:30:00", "2026-10-25T02:45:00", berlin),
+        graph_event("fine", "2026-10-25T08:00:00", "2026-10-25T09:00:00"),
+    ]
+
+    def in_berlin(document: dict[str, Any]) -> None:
+        document["timezone"] = berlin
+
+    with work_gate(
+        start_gate,
+        tmp_path,
+        graph,
+        signed_in,
+        certificate,
+        edit=in_berlin,
+        now="2026-10-20T12:00:00Z",
+    ) as (gate, _):
+        async with agent_client(gate) as client:
+            result = await call(client, EVENTS_TOOL)
+
+    assert [e["start"] for e in result["events"]] == ["2026-10-25T08:00Z"]
+    assert (entry_of(result)["status"], entry_of(result)["skipped_items"]) == ("incomplete", "1")
 
 
 @pytest.mark.anyio
