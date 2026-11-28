@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "anyio==4.16.0",
     "mcp==2.3.0",
+    "msal==1.39.0",
     "pydantic==2.14.3",
     "starlette==1.10.0",
     "uvicorn==0.54.0",
@@ -43,3 +44,8 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+
+# MSAL ships no type information.
+[[tool.mypy.overrides]]
+module = ["msal", "msal.*"]
+ignore_missing_imports = true

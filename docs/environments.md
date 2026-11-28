@@ -101,7 +101,7 @@ Every outside service has a deterministic stand-in; no vendor sandbox account is
 | Local inference | canned stub: `POST /v1/chat/completions` always answers `unknown` | `standins:9108` | `GLOVEBOX_STANDIN_INFERENCE_LOCAL` |
 | External inference | canned stub, same answer | `standins:9109` | `GLOVEBOX_STANDIN_INFERENCE_EXTERNAL` |
 
-Consequences (ADR 0007): live sources are never exercised on throwaway or test; their acceptance is operator-run against the operator's own accounts. The inference stand-ins say nothing about classification quality or inference resource use.
+Consequences (ADR 0007): live sources are never exercised on throwaway or test; their acceptance is operator-run against the operator's own accounts. The inference stand-ins say nothing about classification quality or inference resource use. The `o365_mail` source kind does not read the Office 365 mail stand-in above: it speaks Microsoft's own protocols over https, so only the test suite exercises it, against its own TLS stand-in (`docs/o365.md`).
 
 ## Mac test host
 

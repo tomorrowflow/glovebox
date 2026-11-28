@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from glovebox.access import OPERATIONS, Access, AccessError
 from glovebox.config import ConfigError, Settings
-from glovebox.credentials import CredentialsError, read_credentials
+from glovebox.credentials import CredentialsError, Secret, read_credentials, write_credentials
 from glovebox.sources import BEARER_KINDS, SOURCE_KINDS, bridge_problem
 
 DEFAULT_HOST = "127.0.0.1"
@@ -55,6 +55,23 @@ def build_parser() -> argparse.ArgumentParser:
     remove = account_commands.add_parser("remove", help="remove an account and its stored items")
     remove.add_argument("name")
 
+    login = commands.add_parser(
+        "o365-login",
+        help="sign in to Office 365 with read-only mail access, for an o365_mail account",
+    )
+    login.add_argument("--client-id", required=True, help="the app registration's client ID")
+    login.add_argument(
+        "--tenant",
+        default="organizations",
+        help="the employer's tenant ID or domain (default: organizations, any work account)",
+    )
+    login.add_argument(
+        "--authority", help="the full authority URL, instead of the public cloud's with --tenant"
+    )
+    login.add_argument(
+        "--credentials", type=Path, required=True, help="the file to write the login to (0600)"
+    )
+
     token = commands.add_parser("token", help="issue, list or revoke agent tokens")
     token_commands = token.add_subparsers(dest="action", required=True)
     issue = token_commands.add_parser("issue", help="issue a token; its value is shown once")
@@ -77,6 +94,8 @@ def run(argv: Sequence[str], env: Mapping[str, str], out: TextIO, err: TextIO) -
     """Run one operator command; the exit status. `serve` is not run here."""
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "o365-login":
+            return _o365_login(args, out, err)
         access = Access(Settings.from_env(env).db_path)
         if args.command == "account":
             return _account(args, access, out)
@@ -91,7 +110,9 @@ def _account(args: argparse.Namespace, access: Access, out: TextIO) -> int:
         source = _checked_source(args.source)
         if args.credentials is not None:
             # Refuse a file that is open to others now, not at the first request.
-            read_credentials(args.credentials)
+            secret = read_credentials(args.credentials)
+            if args.kind == "o365_mail":
+                _checked_login(source, secret)
         if args.kind in BEARER_KINDS and urlsplit(source).scheme in ("http", "https"):
             problem = bridge_problem(source, args.credentials is not None)
             if problem is not None:
@@ -119,6 +140,35 @@ def _account(args: argparse.Namespace, access: Access, out: TextIO) -> int:
     else:
         access.remove_account(args.name)
         print(f"removed account {args.name}", file=out)
+    return 0
+
+
+def _checked_login(source: str, secret: Secret) -> None:
+    """Refuse an Office 365 account whose Graph endpoint or credentials file cannot work."""
+    # Imported late, like `sources.open_source` does: MSAL loads only when it is needed.
+    from glovebox.o365 import Login, LoginError, graph_problem
+
+    problem = graph_problem(source)
+    if problem is not None:
+        raise AccessError(problem)
+    try:
+        Login.parse(secret)
+    except LoginError as error:
+        raise AccessError(f"{error}; make it with `glovebox o365-login`") from None
+
+
+def _o365_login(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Sign the operator in at Microsoft, asking for read access to mail only (docs/o365.md)."""
+    from glovebox.o365 import AUTHORITY_URL, SignInFailed, sign_in
+
+    authority = args.authority or f"{AUTHORITY_URL}/{args.tenant}"
+    try:
+        login = sign_in(args.client_id, authority, lambda message: print(message, file=err))
+    except SignInFailed as error:
+        print(f"glovebox: the sign-in failed: {error}", file=err)
+        return 1
+    write_credentials(args.credentials, login.text())
+    print(f"wrote the login to {args.credentials}", file=out)
     return 0
 
 
