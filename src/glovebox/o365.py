@@ -204,6 +204,12 @@ def grants_write(scope: object) -> bool:
     return isinstance(scope, str) and WRITE_SCOPE.search(scope) is not None
 
 
+@dataclass(frozen=True)
+class Page:
+    values: list[object]
+    next_link: str | None
+
+
 class O365CalendarSource:
     """The default calendar of a work account, read through Microsoft Graph."""
 
@@ -285,7 +291,7 @@ class O365CalendarSource:
                 logger.warning("the Office 365 credentials file could not be updated")
         return Secret(token)
 
-    def _parse_page(self, document: object) -> "Page":
+    def _parse_page(self, document: object) -> Page:
         if not isinstance(document, Mapping):
             raise SourceError
         values, link = document.get("value"), document.get("@odata.nextLink")
@@ -299,12 +305,6 @@ class O365CalendarSource:
     def _is_graph(self, url: str) -> bool:
         ours, theirs = urlsplit(self._graph), urlsplit(url)
         return (theirs.scheme, theirs.netloc) == (ours.scheme, ours.netloc)
-
-
-@dataclass(frozen=True)
-class Page:
-    values: list[object]
-    next_link: str | None
 
 
 def open_o365_calendar(location: str, credentials: Path | None) -> CalendarSource:

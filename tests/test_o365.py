@@ -178,8 +178,9 @@ def refresh_tokens(credentials: Path) -> set[str]:
 
 
 def entry_of(result: dict[str, Any], kind: str = KIND) -> dict[str, Any]:
-    (entry,) = [e for e in result["accounts"] if e["source_kind"] == kind]
-    return entry  # type: ignore[no-any-return]
+    entries: list[dict[str, Any]] = [e for e in result["accounts"] if e["source_kind"] == kind]
+    (entry,) = entries
+    return entry
 
 
 # --- the calendar is served ---------------------------------------------------------------
