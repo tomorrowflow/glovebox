@@ -27,10 +27,13 @@ from glovebox import chatdb
 from glovebox.credentials import Secret, read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
-SourceKind = Literal["fixture_mail", "fixture_messenger", "imessage", "fixture_calendar"]
+SourceKind = Literal[
+    "fixture_mail", "fixture_messenger", "imessage", "fixture_calendar", "o365_calendar"
+]
 # Who stops a write to the source. `provider`: the access method cannot write at all, so the
 # gate could not write if it tried. `gateway`: the access method could write and the gate has
-# no code path that does (ADR 0003). No source has a provider-enforced read-only access yet.
+# no code path that does (ADR 0003). Only the Office 365 calendar is provider-enforced, by the
+# read-only permission its credential holds (`docs/office365-calendar.md`).
 ReadOnlyEnforcement = Literal["gateway", "provider"]
 # How fresh and complete an account's data is. `current`: the last sync read the whole
 # source. `incomplete`: it did, but some items could not be understood and are missing.
@@ -40,11 +43,14 @@ SyncStatus = Literal["current", "stale", "incomplete", "blocked"]
 SOURCE_KINDS: tuple[str, ...] = get_args(SourceKind)
 # The kinds whose account is a calendar, read by the calendar tools; every other kind is
 # mail or messenger items, read by the item tools.
-CALENDAR_KINDS: frozenset[str] = frozenset({"fixture_calendar"})
-READ_ONLY_ENFORCEMENT: dict[str, ReadOnlyEnforcement] = dict.fromkeys(SOURCE_KINDS, "gateway")
+CALENDAR_KINDS: frozenset[str] = frozenset({"fixture_calendar", "o365_calendar"})
+READ_ONLY_ENFORCEMENT: dict[str, ReadOnlyEnforcement] = {
+    **dict.fromkeys(SOURCE_KINDS, "gateway"),
+    "o365_calendar": "provider",
+}
 # Kinds whose account must name a credentials file. The fixture kinds and the iMessage
 # source (a local file, or a stand-in that asks for none) need none.
-CREDENTIALS_REQUIRED: frozenset[str] = frozenset()
+CREDENTIALS_REQUIRED: frozenset[str] = frozenset({"o365_calendar"})
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 10
@@ -111,11 +117,17 @@ class NoRedirects(urllib.request.HTTPRedirectHandler):
 class DocumentReader:
     """A JSON document, read from a file or from a stand-in or bridge over HTTP, and the way
     an unreadable one is told apart from one that refuses access. Over HTTP the one request
-    is a GET of the location, carrying the bearer token if there is one."""
+    is a GET of the location, carrying the bearer token if there is one and any `headers`."""
 
-    def __init__(self, location: Path | str, bearer: Secret | None = None) -> None:
+    def __init__(
+        self,
+        location: Path | str,
+        bearer: Secret | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         self._location = location
         self._bearer = bearer
+        self._headers = headers or {}
 
     def read_document[T](self, parse: Callable[[object], T]) -> T:
         """The document as `parse` makes of it. Raises SourceBlocked if access is not
@@ -145,7 +157,9 @@ class DocumentReader:
             with self._location.open("rb") as handle:
                 data = handle.read(MAX_DOCUMENT_BYTES + 1)
         else:
-            request = urllib.request.Request(self._location, method="GET")
+            request = urllib.request.Request(
+                self._location, headers=dict(self._headers), method="GET"
+            )
             if self._bearer is not None:
                 if not bearer_may_travel(self._location):
                     raise SourceBlocked

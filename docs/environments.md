@@ -101,6 +101,8 @@ Every outside service has a deterministic stand-in; no vendor sandbox account is
 | Local inference | canned stub: `POST /v1/chat/completions` always answers `unknown` | `standins:9108` | `GLOVEBOX_STANDIN_INFERENCE_LOCAL` |
 | External inference | canned stub, same answer | `standins:9109` | `GLOVEBOX_STANDIN_INFERENCE_EXTERNAL` |
 
+The canned Office 365 calendar stand-in serves the `fixture_calendar` document shape, not Graph. The real `o365_calendar` adapter is tested against a scripted TLS stand-in of the sign-in service and Graph that lives in the tests (`tests/o365_standin.py`), because `msal` accepts only https; it has no place in the throwaway stack (`docs/office365-calendar.md`).
+
 Consequences (ADR 0007): live sources are never exercised on throwaway or test; their acceptance is operator-run against the operator's own accounts. The inference stand-ins say nothing about classification quality or inference resource use.
 
 ## Mac test host
