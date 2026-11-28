@@ -11,6 +11,6 @@
 - [ ] The target client is named: the client the operator's agents run on. The check documents its version and how it presents tool results to the model.
 - [ ] The check calls gate tools through that client against `GLOVEBOX_TEST_URL` with `GLOVEBOX_TEST_TOKEN` and captures what the client hands to the model for the tool listing, a successful result and an error result.
 - [ ] The captured model input contains only permitted fields and static tool text; no hostile-corpus string or fragment from the fixture cast appears in it.
-- [ ] If the client needs a serialized text copy of the structured content to work, the gate provides one that contains only the same validated permitted fields, and the acceptance tests of ticket 05 cover that copy.
+- [x] If the client needs a serialized text copy of the structured content to work, the gate provides one that contains only the same validated permitted fields, and the acceptance tests of ticket 05 cover that copy. (Settled for OpenClaw 2026.11.10: the client's adapter adds its own `structuredContent:` text block when `content` is empty, so the gate provides no copy; see `docs/client-adapter-check.md`.)
 - [ ] The check can be rerun with one documented command and fails when a corpus string reaches model context.
 - [ ] The documentation states that the result holds for this client and version only, and that every further target client needs its own check.
