@@ -47,7 +47,7 @@ Three outcomes are possible, and only the first delivers the source:
 - **Consent refused or never answered.** The source stays `blocked`. Record it as `blocked` with the reason on the ticket; it closes as blocked, not delivered. Never work around the refusal: no personal app registration, no borrowed client ID, no scraping the web client, no forwarding rules (ADR 0003: workplace restrictions are never bypassed).
 - **Consent granted, but the tenant blocks the device code flow** (a Conditional Access policy can). The sign-in fails and the source is `blocked` for the same reason. Ask the administrator for an exception for this one app, or record it as blocked.
 
-Withdrawing consent later has the same effect on a running gate: the next refresh fails, the account becomes `blocked`, and the other accounts are unaffected.
+Withdrawing consent later has the same effect on a running gate: the next refresh fails, the account becomes `blocked`, and the other accounts are unaffected. The gate uses an access token from its cache for as long as Microsoft says it lives (about an hour, and sooner if Microsoft revokes it), so the account turns `blocked` at the first refresh after that, not at the moment of withdrawal.
 
 ### 2. Sign in, on the gateway host, as the gateway's user
 

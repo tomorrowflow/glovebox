@@ -251,7 +251,7 @@ def hostile_graph_events() -> list[object]:
     attendees, categories, links, the series and iCalendar IDs and the event ID, with a valid
     time and, for some, in the status properties Graph documents a closed vocabulary for. Four
     more per corpus string carry it where the gate cannot read it: the time, its time zone, the
-    all-day flag and the answer, each with an otherwise valid event.
+    all-day and cancelled flags, `showAs` and the answer, each with an otherwise valid event.
     """
     events: list[object] = []
     for index, text in enumerate(CORPUS.values()):
@@ -299,6 +299,9 @@ def hostile_graph_events() -> list[object]:
         events.append({**valid, "id": f"bad-zone-{text}", "end": {**end, "timeZone": text}})
         events.append({**valid, "id": f"bad-flag-{text}", "isAllDay": text})
         events.append({**valid, "id": f"bad-answer-{text}", "responseStatus": text})
+        events.append({**valid, "id": f"bad-response-{text}", "responseStatus": {"response": text}})
+        events.append({**valid, "id": f"bad-show-as-{text}", "showAs": text})
+        events.append({**valid, "id": f"bad-cancelled-{text}", "isCancelled": text})
     return events
 
 

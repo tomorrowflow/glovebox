@@ -410,9 +410,11 @@ def sign_in(
     try:
         app = application(login_from(document), cache)
         flow = app.initiate_device_flow(scopes=READ_SCOPES)
-        if "user_code" not in flow:
+        code, address = flow.get("user_code"), flow.get("verification_uri")
+        if not isinstance(code, str) or not isinstance(address, str):
             raise LoginError("the sign-in could not be started")
-        print(flow["message"], file=out, flush=True)
+        # The prompt is built here, not taken from the service's own message.
+        print(f"To sign in, open {address} and enter the code {code}.", file=out, flush=True)
         result = app.acquire_token_by_device_flow(flow)
     except CredentialsError as error:
         raise LoginError(str(error)) from None

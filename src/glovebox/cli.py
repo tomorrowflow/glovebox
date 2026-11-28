@@ -58,17 +58,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     o365 = commands.add_parser("o365", help="sign in to the work Office 365 calendar")
     o365_commands = o365.add_subparsers(dest="action", required=True)
-    sign_in = o365_commands.add_parser(
+    login = o365_commands.add_parser(
         "login",
         help="sign in with the read-only calendar permission and write the credentials file",
     )
-    sign_in.add_argument("--credentials", type=Path, required=True, help="the file to write")
-    sign_in.add_argument("--client-id", required=True, help="the application (client) ID")
-    sign_in.add_argument("--tenant-id", required=True, help="the directory (tenant) ID")
-    sign_in.add_argument(
+    login.add_argument("--credentials", type=Path, required=True, help="the file to write")
+    login.add_argument("--client-id", required=True, help="the application (client) ID")
+    login.add_argument("--tenant-id", required=True, help="the directory (tenant) ID")
+    login.add_argument(
         "--timezone", default="UTC", help="the calendar's IANA time zone, for all-day events"
     )
-    sign_in.add_argument("--authority", help="replaces the Microsoft sign-in address")
+    login.add_argument("--authority", help="replaces the Microsoft sign-in address")
 
     token = commands.add_parser("token", help="issue, list or revoke agent tokens")
     token_commands = token.add_subparsers(dest="action", required=True)

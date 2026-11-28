@@ -842,6 +842,27 @@ async def test_no_corpus_string_reaches_any_channel_from_hostile_events_or_error
             {"error": CORPUS["tool_call"], "error_description": CORPUS["markdown"]},
         ),
         "token html": ("token", 500, CORPUS["newlines"]),
+        # Every corpus string at once, in the places an error body can hold text.
+        "graph every string": (
+            "graph",
+            500,
+            {"error": {"code": CORPUS["marker"], "message": CORPUS, "innerError": [CORPUS]}},
+        ),
+        "token every string": (
+            "token",
+            400,
+            {"error": "invalid_grant", "error_description": CORPUS["sql"], "trace": CORPUS},
+        ),
+        "token scope": (
+            "token",
+            200,
+            {"scope": CORPUS["injection"], "access_token": CORPUS["long"]},
+        ),
+        "next link": (
+            "graph",
+            200,
+            {"value": [], "@odata.nextLink": f"https://evil.test/{CORPUS['markdown']}"},
+        ),
     }
     with work_gate(start_gate, tmp_path, graph, signed_in, certificate) as (gate, _):
         channels = await observe_gate(gate)
