@@ -150,6 +150,34 @@ async def test_mail_of_the_window_is_served_as_items_with_permitted_fields(
 
 
 @pytest.mark.anyio
+async def test_message_ids_that_differ_only_in_case_are_separate_threads(
+    start_gate: GateStarter, tmp_path: Path
+) -> None:
+    """The local part of a Message-ID is case-sensitive, its domain is not (RFC 5322)."""
+    mails = [
+        mail(1, "a@example.test", "2026-01-05T09:00:00Z", message_id="<Case@example.test>"),
+        mail(2, "b@example.test", "2026-01-05T09:01:00Z", message_id="<case@example.test>"),
+        mail(
+            3, "c@example.test", "2026-01-05T09:02:00Z", references="<Case@example.test> <x@y.test>"
+        ),
+        mail(4, "d@example.test", "2026-01-05T09:03:00Z", in_reply_to="<case@example.test>"),
+        mail(5, "e@example.test", "2026-01-05T09:04:00Z", references="<case@EXAMPLE.test>"),
+    ]
+    with imap_serving(mails) as standin:
+        with serving_gate(start_gate, tmp_path, standin) as gate:
+            async with agent_client(gate) as client:
+                listing = await call(client, LIST_TOOL, sort="received_asc")
+
+    first, second, reply_to_first, reply_to_second, reply_by_domain_case = [
+        item["thread_handle"] for item in listing["items"]
+    ]
+    assert first != second
+    assert reply_to_first == first
+    assert reply_to_second == second
+    assert reply_by_domain_case == second  # the domain's case never matters
+
+
+@pytest.mark.anyio
 async def test_the_account_reports_that_read_only_is_enforced_by_the_gateway(
     start_gate: GateStarter, tmp_path: Path
 ) -> None:
