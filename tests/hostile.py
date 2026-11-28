@@ -244,6 +244,64 @@ def hostile_calendar_fixture() -> dict[str, object]:
     return {"account": f"{CORPUS['marker']} <account@evil.test>", "events": events}
 
 
+def hostile_graph_events() -> list[object]:
+    """Microsoft Graph events with a corpus string in every attacker-writable property.
+
+    One event per corpus string carries it in the subject, preview, location, organizer,
+    attendees, categories, links, the series and iCalendar IDs and the event ID, with a valid
+    time and, for some, in the status properties Graph documents a closed vocabulary for. Four
+    more per corpus string carry it where the gate cannot read it: the time, its time zone, the
+    all-day flag and the answer, each with an otherwise valid event.
+    """
+    events: list[object] = []
+    for index, text in enumerate(CORPUS.values()):
+        hour = 7 + index
+        event: dict[str, object] = {
+            "id": f"AAMk-{text}",
+            "iCalUId": f"ical-{text}",
+            "seriesMasterId": f"series-{text}",
+            "subject": text,
+            "bodyPreview": text,
+            "body": {"contentType": "html", "content": f"<p>{text}</p>"},
+            "location": {"displayName": text, "address": {"street": text}},
+            "locations": [{"displayName": text}],
+            "organizer": {"emailAddress": {"name": text, "address": f"{text}@evil.test"}},
+            "attendees": [{"emailAddress": {"name": text}, "status": {"response": text}}],
+            "categories": [text],
+            "webLink": f"https://evil.test/{text}",
+            "onlineMeeting": {"joinUrl": f"https://evil.test/{text}"},
+            "onlineMeetingUrl": f"https://evil.test/{text}",
+            "start": {"dateTime": f"2026-01-12T{hour:02d}:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": f"2026-01-12T{hour:02d}:45:00.0000000", "timeZone": "UTC"},
+            "isAllDay": False,
+            "isCancelled": False,
+            "showAs": "busy",
+            "responseStatus": {"response": "accepted", "time": text},
+        }
+        if index % 3 == 1:
+            event["showAs"] = text
+        elif index % 3 == 2:
+            event["responseStatus"] = {"response": text}
+        events.append(event)
+    valid: dict[str, object] = {
+        "subject": "unreadable",
+        "start": {"dateTime": "2026-01-13T10:00:00.0000000", "timeZone": "UTC"},
+        "end": {"dateTime": "2026-01-13T11:00:00.0000000", "timeZone": "UTC"},
+        "isAllDay": False,
+        "isCancelled": False,
+        "showAs": "busy",
+        "responseStatus": {"response": "accepted"},
+    }
+    for text in CORPUS.values():
+        start, end = valid["start"], valid["end"]
+        assert isinstance(start, dict) and isinstance(end, dict)
+        events.append({**valid, "id": f"bad-time-{text}", "start": {**start, "dateTime": text}})
+        events.append({**valid, "id": f"bad-zone-{text}", "end": {**end, "timeZone": text}})
+        events.append({**valid, "id": f"bad-flag-{text}", "isAllDay": text})
+        events.append({**valid, "id": f"bad-answer-{text}", "responseStatus": text})
+    return events
+
+
 FILTER_PARAMETERS = (
     "read_status",
     "received_from",

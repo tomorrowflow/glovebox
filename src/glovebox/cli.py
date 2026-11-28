@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from glovebox.access import OPERATIONS, Access, AccessError
 from glovebox.config import ConfigError, Settings
 from glovebox.credentials import CredentialsError, read_credentials
+from glovebox.o365 import LoginError, read_login, sign_in, source_problem
 from glovebox.sources import BEARER_KINDS, SOURCE_KINDS, bridge_problem
 
 DEFAULT_HOST = "127.0.0.1"
@@ -55,6 +56,20 @@ def build_parser() -> argparse.ArgumentParser:
     remove = account_commands.add_parser("remove", help="remove an account and its stored items")
     remove.add_argument("name")
 
+    o365 = commands.add_parser("o365", help="sign in to the work Office 365 calendar")
+    o365_commands = o365.add_subparsers(dest="action", required=True)
+    sign_in = o365_commands.add_parser(
+        "login",
+        help="sign in with the read-only calendar permission and write the credentials file",
+    )
+    sign_in.add_argument("--credentials", type=Path, required=True, help="the file to write")
+    sign_in.add_argument("--client-id", required=True, help="the application (client) ID")
+    sign_in.add_argument("--tenant-id", required=True, help="the directory (tenant) ID")
+    sign_in.add_argument(
+        "--timezone", default="UTC", help="the calendar's IANA time zone, for all-day events"
+    )
+    sign_in.add_argument("--authority", help="replaces the Microsoft sign-in address")
+
     token = commands.add_parser("token", help="issue, list or revoke agent tokens")
     token_commands = token.add_subparsers(dest="action", required=True)
     issue = token_commands.add_parser("issue", help="issue a token; its value is shown once")
@@ -77,13 +92,28 @@ def run(argv: Sequence[str], env: Mapping[str, str], out: TextIO, err: TextIO) -
     """Run one operator command; the exit status. `serve` is not run here."""
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "o365":
+            return _o365_login(args, out)
         access = Access(Settings.from_env(env).db_path)
         if args.command == "account":
             return _account(args, access, out)
         return _token(args, access, out, err)
-    except (AccessError, CredentialsError, ConfigError) as error:
+    except (AccessError, CredentialsError, ConfigError, LoginError) as error:
         print(f"glovebox: {error}", file=err)
         return 1
+
+
+def _o365_login(args: argparse.Namespace, out: TextIO) -> int:
+    sign_in(
+        args.credentials,
+        client_id=args.client_id,
+        tenant_id=args.tenant_id,
+        timezone=args.timezone,
+        authority=args.authority,
+        out=out,
+    )
+    print(f"wrote {args.credentials}", file=out)
+    return 0
 
 
 def _account(args: argparse.Namespace, access: Access, out: TextIO) -> int:
@@ -96,6 +126,12 @@ def _account(args: argparse.Namespace, access: Access, out: TextIO) -> int:
             problem = bridge_problem(source, args.credentials is not None)
             if problem is not None:
                 raise AccessError(problem)
+        if args.kind == "o365_calendar":
+            problem = source_problem(source)
+            if problem is not None:
+                raise AccessError(problem)
+            if args.credentials is not None:
+                read_login(args.credentials)  # refuse a file that holds no sign-in now
         account = access.add_account(args.name, args.kind, source, args.credentials)
         print(f"added account {account.name} with handle {account.handle}", file=out)
     elif args.action == "list":

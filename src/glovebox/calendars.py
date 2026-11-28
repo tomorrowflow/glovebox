@@ -95,7 +95,7 @@ class CalendarSource(Protocol):
 
 def look_ahead(now: datetime) -> tuple[datetime, datetime]:
     """The start of the look-ahead, `now` at minute precision, and its end, 90 days on."""
-    start = _minute(now)
+    start = minute(now)
     return start, start + timedelta(days=LOOK_AHEAD_DAYS)
 
 
@@ -139,6 +139,11 @@ def open_calendar(kind: str, location: str, credentials: Path | None) -> Calenda
 
     Raises CredentialsError, which carries no detail, if the file cannot be used.
     """
+    if kind == "o365_calendar":
+        # Imported late: the Office 365 source builds on this module.
+        from glovebox.o365 import open_o365_calendar
+
+        return open_o365_calendar(location, credentials)
     if credentials is not None:
         read_credentials(credentials)
     if kind not in CALENDAR_KINDS:
@@ -172,13 +177,13 @@ def parse_calendar(document: object, now: datetime) -> SourceCalendar:
             continue
         found += parsed
     return SourceCalendar(
-        events=_identified(found),
+        events=identified(found),
         skipped=skipped,
         incomplete_from=look_ahead(now)[0] if unexpanded else None,
     )
 
 
-def _identified(events: Sequence[SourceEvent]) -> list[SourceEvent]:
+def identified(events: Sequence[SourceEvent]) -> list[SourceEvent]:
     """The events, each under an identity of its own, and so with a handle of its own.
 
     Events with one identity are one event repeated, unless they differ. Different events
@@ -210,7 +215,7 @@ def _content_identity(event: SourceEvent) -> str:
     )
 
 
-def _identity(uid: str, day: date | None) -> str:
+def identity(uid: str, day: date | None) -> str:
     """The key of an event or, for a recurring one, of its occurrence on `day`.
 
     A list of strings in JSON has one spelling and reads back one way, so a UID can never
@@ -265,9 +270,9 @@ def _occurrences_of(raw: object, default_zone: tzinfo, now: datetime) -> list[So
             continue
         events.append(
             SourceEvent(
-                upstream_id=_identity(uid, None if rule is None else day),
-                start=_minute(start),
-                end=_minute(end),
+                upstream_id=identity(uid, None if rule is None else day),
+                start=minute(start),
+                end=minute(end),
                 all_day=all_day,
                 busy_status=status,
             )
@@ -288,7 +293,7 @@ def _timed_span(raw: Mapping[str, object], zone: tzinfo) -> tuple[date, Span] | 
     first_end = _instant(raw.get("end"), zone)
     if first_start is None or first_end is None:
         return None
-    if _minute(first_end) <= _minute(first_start):
+    if minute(first_end) <= minute(first_start):
         return None
     local = first_start.astimezone(zone)
     first_day, wall_time = local.date(), local.time()
@@ -316,7 +321,7 @@ def _all_day_span(raw: Mapping[str, object], zone: tzinfo) -> tuple[date, Span] 
     length = end_day - first_day
 
     def span(day: date) -> tuple[datetime, datetime]:
-        return _midnight(day, zone), _midnight(day + length, zone)
+        return midnight(day, zone), midnight(day + length, zone)
 
     return first_day, span
 
@@ -331,6 +336,13 @@ def busy_status_of(raw: Mapping[str, object]) -> BusyStatus:
     for key, (default, table) in STATUS_TABLES.items():
         value = raw.get(key, default)
         mapped.append(table.get(value) if isinstance(value, str) else None)
+    return combined_status(mapped)
+
+
+def combined_status(mapped: Sequence[BusyStatus | None]) -> BusyStatus:
+    """One busy status from what each of an event's properties says, `None` for a value
+    outside the vocabulary: `unknown` if any is, `free` if any says the time is not held,
+    `tentative` if any says it may not be, else `busy`."""
     if None in mapped:
         return "unknown"
     if "free" in mapped:
@@ -501,9 +513,9 @@ def _date(value: object) -> date | None:
         return None
 
 
-def _midnight(day: date, zone: tzinfo) -> datetime:
+def midnight(day: date, zone: tzinfo) -> datetime:
     return datetime.combine(day, time()).replace(tzinfo=zone).astimezone(UTC)
 
 
-def _minute(moment: datetime) -> datetime:
+def minute(moment: datetime) -> datetime:
     return moment.replace(second=0, microsecond=0)
