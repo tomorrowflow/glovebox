@@ -15,7 +15,7 @@ import json
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
@@ -27,7 +27,9 @@ from glovebox import chatdb
 from glovebox.credentials import Secret, read_credentials
 
 ReadStatus = Literal["read", "unread", "unknown"]
-SourceKind = Literal["fixture_mail", "fixture_messenger", "imessage", "o365_mail"]
+SourceKind = Literal[
+    "fixture_mail", "fixture_messenger", "imessage", "fixture_calendar", "o365_mail"
+]
 # Who stops a write to the source. `provider`: the access method cannot write at all, so the
 # gate could not write if it tried. `gateway`: the access method could write and the gate has
 # no code path that does (ADR 0003). Office 365 mail is the one source whose credential
@@ -39,6 +41,9 @@ ReadOnlyEnforcement = Literal["gateway", "provider"]
 # sync failed because access is not granted.
 SyncStatus = Literal["current", "stale", "incomplete", "blocked"]
 SOURCE_KINDS: tuple[str, ...] = get_args(SourceKind)
+# The kinds whose account is a calendar, read by the calendar tools; every other kind is
+# mail or messenger items, read by the item tools.
+CALENDAR_KINDS: frozenset[str] = frozenset({"fixture_calendar"})
 READ_ONLY_ENFORCEMENT: dict[str, ReadOnlyEnforcement] = {
     **dict.fromkeys(SOURCE_KINDS, "gateway"),
     "o365_mail": "provider",
@@ -109,24 +114,20 @@ class NoRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-class FixtureSource(ABC):
-    """A document, read from a file or from a stand-in or bridge over HTTP, and the way an
-    unreadable one is told apart from one that refuses access. A subclass names the kind
-    and parses the document. Over HTTP the one request is a GET of the location, carrying
-    the bearer token if there is one."""
-
-    kind: SourceKind
+class DocumentReader:
+    """A JSON document, read from a file or from a stand-in or bridge over HTTP, and the way
+    an unreadable one is told apart from one that refuses access. Over HTTP the one request
+    is a GET of the location, carrying the bearer token if there is one."""
 
     def __init__(self, location: Path | str, bearer: Secret | None = None) -> None:
         self._location = location
         self._bearer = bearer
 
-    @abstractmethod
-    def parse(self, document: object) -> SourceMailbox: ...
-
-    def fetch(self, since: datetime, now: datetime) -> SourceMailbox:
+    def read_document[T](self, parse: Callable[[object], T]) -> T:
+        """The document as `parse` makes of it. Raises SourceBlocked if access is not
+        granted and SourceError for any other failure, never anything with detail."""
         try:
-            return self.parse(json.loads(self._read()))
+            return parse(json.loads(self._read()))
         except SourceError:
             raise
         except urllib.error.HTTPError as error:
@@ -161,6 +162,19 @@ class FixtureSource(ABC):
         if len(data) > MAX_DOCUMENT_BYTES:
             raise SourceError
         return data
+
+
+class FixtureSource(DocumentReader, ABC):
+    """An item source that reads a document. A subclass names the kind and parses the
+    document into a mailbox."""
+
+    kind: SourceKind
+
+    @abstractmethod
+    def parse(self, document: object) -> SourceMailbox: ...
+
+    def fetch(self, since: datetime, now: datetime) -> SourceMailbox:
+        return self.read_document(self.parse)
 
 
 class FixtureMailSource(FixtureSource):

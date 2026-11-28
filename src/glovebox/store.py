@@ -21,23 +21,29 @@ from pathlib import Path
 from typing import Any, get_args
 
 from glovebox import db
+from glovebox.availability import look_ahead_range
+from glovebox.calendars import BLOCKING_STATUSES, SourceCalendar, clip_to_look_ahead, look_ahead
 from glovebox.classification import UNKNOWN, Classification
 from glovebox.db import MINT_ATTEMPTS, new_handle
 from glovebox.fields import ClassificationStatus
 from glovebox.formats import (
     COUNT_CAP,
     COUNT_CAPPED,
+    MAX_EVENTS,
     SKIPPED_CAP,
     SKIPPED_CAPPED,
     WINDOW_DAYS,
     minute,
 )
-from glovebox.query import Filters, GroupBy, SortOrder
+from glovebox.query import EventFilters, EventSortOrder, Filters, GroupBy, SortOrder
 from glovebox.sources import READ_ONLY_ENFORCEMENT, SourceItem, SourceMailbox, SyncStatus
 
 # What `sync_state.last_sync` holds for an account that has never synced: the column
 # cannot be null, and no minute is ever empty.
 NEVER_SYNCED = ""
+
+# What `sync_state.coverage_end` holds for a calendar account whose stored events are all it has.
+FULL_COVERAGE = ""
 
 # The fixed sort orders, each ending in the item handle so that a page boundary is stable.
 SORT_ORDERS: dict[SortOrder, str] = {
@@ -49,6 +55,13 @@ SORT_ORDERS: dict[SortOrder, str] = {
     ),
     "attachments_first": "has_attachments desc, received desc, item_handle",
 }
+# The fixed sort orders of events, each ending in the event handle so that a page boundary is
+# stable.
+EVENT_SORT_ORDERS: dict[EventSortOrder, str] = {
+    "start_asc": "start_time, end_time, event_handle",
+    "start_desc": "start_time desc, end_time desc, event_handle",
+}
+EVENT_COLUMNS = "event_handle, account_handle, start_time, end_time, all_day, busy_status"
 GROUP_COLUMNS: dict[GroupBy, str] = {
     "sender_handle": "sender_handle",
     "thread_handle": "thread_handle",
@@ -201,6 +214,75 @@ class Store:
                 (account, kind, status, minute(synced_at), prepared.skipped),
             )
 
+    def commit_calendar(
+        self, account: str, kind: str, calendar: SourceCalendar, synced_at: datetime
+    ) -> None:
+        """Make the account's stored events match one complete fetch, in one transaction.
+
+        Events outside the look-ahead at `synced_at` are not ingested, and one that runs past
+        its end is stored cut there. At most MAX_EVENTS are kept, the earliest first; the
+        rest count as skipped, and the start of the first one left out is recorded as where
+        the account's coverage ends, so that time from then on is never reported as free.
+        So is the point from which the source says some of its events are not all known
+        (`calendar.incomplete_from`). The account is current, or incomplete if the source held
+        events that could not be understood, expanded or kept. An account the operator
+        removed in the meantime is not written to.
+        """
+        window_start, _ = look_ahead(synced_at)
+        with self._transaction() as database:
+            known = database.execute("select 1 from accounts where handle = ?", (account,))
+            if known.fetchone() is None:
+                return
+            key = _meta_key(database, "handle_key")
+            database.execute("delete from events where account_handle = ?", (account,))
+            database.execute("delete from events where end_time <= ?", (minute(window_start),))
+            skipped = calendar.skipped
+            kept = 0
+            incomplete_from = (
+                [] if calendar.incomplete_from is None else [minute(calendar.incomplete_from)]
+            )
+            for event in sorted(calendar.events, key=lambda e: (e.start, e.upstream_id)):
+                served = clip_to_look_ahead(event.start, event.end, synced_at)
+                if served is None:
+                    continue
+                if kept == MAX_EVENTS:
+                    skipped += 1
+                    incomplete_from.append(minute(served[0]))
+                    continue
+                kept += 1
+                database.execute(
+                    "insert or replace into events values (?, ?, ?, ?, ?, ?)",
+                    (
+                        _handle(database, key, "event", account, event.upstream_id),
+                        account,
+                        minute(served[0]),
+                        minute(served[1]),
+                        int(event.all_day),
+                        event.busy_status,
+                    ),
+                )
+            coverage_end = min(incomplete_from, default=FULL_COVERAGE)
+            status: SyncStatus = "incomplete" if skipped else "current"
+            database.execute(
+                "insert or replace into sync_state"
+                " (account_handle, source_kind, status, last_sync, skipped, coverage_end)"
+                " values (?, ?, ?, ?, ?, ?)",
+                (account, kind, status, minute(synced_at), skipped, coverage_end),
+            )
+
+    def unknown_from(self, accounts: Sequence[str]) -> str | None:
+        """The earliest minute from which the stored events of any of `accounts` are not
+        complete, or None if all of them are complete. From there on, one account may hold
+        time that no stored event says it holds, whatever the others hold."""
+        marks = ", ".join("?" for _ in accounts)
+        with self._reader() as database:
+            (earliest,) = database.execute(
+                "select min(coverage_end) from sync_state where coverage_end != ?"
+                f" and account_handle in ({marks})",
+                (FULL_COVERAGE, *accounts),
+            ).fetchone()
+        return None if earliest is None else str(earliest)
+
     def mark_unsynced(self, account: str, kind: str, status: SyncStatus) -> None:
         """Record that the last sync of the account failed.
 
@@ -328,6 +410,82 @@ class Store:
             {"key": UNKNOWN if row[0] is None else row[0], "count": spell_count(row[1])}
             for row in rows
         ]
+
+    def list_events(
+        self,
+        accounts: Sequence[str],
+        now: datetime,
+        filters: EventFilters,
+        order: EventSortOrder,
+        limit: int,
+        offset: int,
+    ) -> list[dict[str, Any]]:
+        """One page of the events of `accounts` inside the look-ahead, as stored.
+
+        Nothing here vouches for the values. Events of any other account in the database
+        are not served.
+        """
+        where, parameters = _event_where(accounts, now, filters.range_from, filters.range_to)
+        for condition, value in (
+            ("busy_status = ?", filters.busy_status),
+            ("all_day = ?", None if filters.all_day is None else int(filters.all_day)),
+        ):
+            if value is not None:
+                where += f" and {condition}"
+                parameters.append(value)
+        with self._reader() as database:
+            rows = database.execute(
+                f"select {EVENT_COLUMNS} from events where {where}"
+                f" order by {EVENT_SORT_ORDERS[order]} limit ? offset ?",
+                (*parameters, limit, offset),
+            ).fetchall()
+        return [_event(row) for row in rows]
+
+    def blocking_events(
+        self, accounts: Sequence[str], now: datetime, range_from: str, range_to: str
+    ) -> list[dict[str, Any]]:
+        """Every event of `accounts` that holds time and overlaps the range, by start.
+
+        A range of no length, or that ends before it starts, has none.
+        """
+        where, parameters = _event_where(accounts, now, range_from, range_to)
+        marks = ", ".join("?" for _ in BLOCKING_STATUSES)
+        with self._reader() as database:
+            rows = database.execute(
+                f"select {EVENT_COLUMNS} from events where {where} and busy_status in ({marks})"
+                f" order by {EVENT_SORT_ORDERS['start_asc']}",
+                (*parameters, *BLOCKING_STATUSES),
+            ).fetchall()
+        return [_event(row) for row in rows]
+
+
+def _event(row: Sequence[Any]) -> dict[str, Any]:
+    return {
+        "event_handle": row[0],
+        "account_handle": row[1],
+        "start": row[2],
+        "end": row[3],
+        # Anything but 0 or 1 stays as it is, for the output validator to refuse.
+        "all_day": {0: False, 1: True}.get(row[4], row[4]),
+        "busy_status": row[5],
+    }
+
+
+def _event_where(
+    accounts: Sequence[str], now: datetime, range_from: str | None, range_to: str | None
+) -> tuple[str, list[object]]:
+    """The conditions that select the events of `accounts` that overlap a range.
+
+    The range is cut to the look-ahead first, so no event is selected for time outside it, and
+    a range with no time left selects nothing. As in `_where`, column names come from this
+    module and every value is a parameter.
+    """
+    start, end = look_ahead_range(now, range_from, range_to)
+    marks = ", ".join("?" for _ in accounts)
+    conditions = [f"account_handle in ({marks})", "end_time > ?", "start_time < ?"]
+    if start >= end:
+        conditions.append("0")
+    return " and ".join(conditions), [*accounts, start, end]
 
 
 def spell_count(count: int) -> str:
